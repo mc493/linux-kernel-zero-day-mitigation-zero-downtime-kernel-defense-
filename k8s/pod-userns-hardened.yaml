@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hardened-app-workload
+  labels:
+    app.kubernetes.io/name: hardened-app
+spec:
+  runtimeClassName: runc
+  # Enforce User Namespaces: container UID 0 is remapped to unprivileged host UID > 165536
+  hostUsers: false
+  containers:
+  - name: app
+    image: alpine:latest
+    command: ["sleep", "3600"]
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL

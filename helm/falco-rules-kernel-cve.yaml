@@ -1,0 +1,36 @@
+# Falco Helm Values: Zero-Day Linux Kernel Compensating Controls
+# Targets: CVE-2025-39964 (AF_ALG) and CVE-2025-39682 (kTLS)
+
+driver:
+  kind: auto
+  type: modern_ebpf
+
+falco:
+  # Linux 7.0 ABI Invariant:
+  # modern_ebpf on modern kernels must exclude openat from custom syscall sets
+  # to prevent register-clobbering parsing panics
+  base_syscalls:
+    custom_set: ['!openat']
+
+customRules:
+  rules-kernel-cve.yaml: |-
+    - rule: Detect AF_ALG Crypto Socket Creation (CVE-2025-39964)
+      desc: Detects creation of Crypto API Netlink sockets used in local privilege escalation
+      condition: evt.type = socket and evt.rawarg.domain = 38
+      output: "Active Exploit Probe: AF_ALG socket requested (domain=%evt.rawarg.domain type=%evt.rawarg.type user=%user.name proc=%proc.name container=%container.id)"
+      priority: WARNING
+      tags: [cve, zero-day, cve-2025-39964, crypto, container_escape]
+
+    - rule: Detect Container Kernel TLS Activation (CVE-2025-39682)
+      desc: Detects container workloads attaching kTLS TCP_ULP or configuring SOL_TLS
+      condition: container.id != host and evt.type = setsockopt and ((evt.rawarg.level = 6 and evt.rawarg.optname = 31) or (evt.rawarg.level = 282))
+      output: "Container kTLS Activation Detected (level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name container=%container.name)"
+      priority: WARNING
+      tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp]
+
+falcosidekick:
+  enabled: true
+  config:
+    webhook:
+      address: "http://127.0.0.1:9876/falco-alert"
+      minimumpriority: "warning"
