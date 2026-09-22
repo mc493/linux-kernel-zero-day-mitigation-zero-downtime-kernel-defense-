@@ -5,8 +5,10 @@ metadata:
   labels:
     app.kubernetes.io/name: hardened-app
 spec:
-  runtimeClassName: runc
   # Enforce User Namespaces: container UID 0 is remapped to unprivileged host UID > 165536
+  # Works with Kubernetes CRI v1.30+ and containerd v2.2+ default runtime handler.
+  # If your cluster uses a dedicated RuntimeClass name for userns, uncomment:
+  # runtimeClassName: runc
   hostUsers: false
   containers:
   - name: app

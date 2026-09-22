@@ -276,12 +276,17 @@ This repository includes production-ready configurations for immediate deploymen
 |   \-- modprobe.d/
 |       \-- blacklist-ebtables.conf     # Modprobe loader override
 |-- helm/
-|   \-- falco-rules-kernel-cve.yaml     # Falco modern eBPF rules (CO-RE)
+|   |-- falco-rules-kernel-cve.yaml     # Falco modern eBPF rules (CO-RE)
+|   \-- README.md                       # One-line Helm deployment guide
 |-- k8s/
 |   \-- pod-userns-hardened.yaml        # containerd v2.2.4 UserNS manifest
 |-- scripts/
 |   |-- evict-and-harden.sh             # Two-step module eviction & sealing
-|   \-- verify-mitigation.sh            # Automated verification probe
+|   \-- verify-mitigation.sh            # Automated verification & CI test suite
+|-- seccomp/
+|   \-- seccomp-block-af-alg.json       # Inline SECCOMP blocking profile (EACCES)
+|-- vault/
+|   \-- audit_vault.py                  # Cryptographic SHA-256 hash-chain engine
 |-- README.md
 \-- LICENSE
 ```
@@ -298,5 +303,5 @@ This repository includes production-ready configurations for immediate deploymen
 
 ---
 
-*Authored by the Sovereign Cluster Security & SRE Team.*  
-*Tested and Attested across Production Bare-Metal Silicon.*
+*Maintained by the Sovereign Systems & Security Architecture Team.*  
+*Production-Tested on Linux HWE & Kubernetes CRI v1.30 (containerd v2.2+).*
