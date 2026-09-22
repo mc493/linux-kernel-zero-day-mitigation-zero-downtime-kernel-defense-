@@ -1,4 +1,4 @@
-# ðŸ›¡ï¸ Zero-Downtime Linux Kernel Zero-Day Defense: Neutralizing CISA Active Exploits with Modern eBPF, Module Disarmament, and User Namespaces
+ Zero-Downtime Linux Kernel Zero-Day Defense: Neutralizing CISA Active Exploits with Modern eBPF, Module Disarmament, and User Namespaces
 
 When the Cybersecurity and Infrastructure Security Agency (CISA) adds critical Linux kernel vulnerabilities to its **Known Exploited Vulnerabilities (KEV)** catalog, an urgent clock starts ticking for every infrastructure team and SRE lead in the world:
 
@@ -11,7 +11,7 @@ This engineering case study documents the **First Principles, Architectural Impl
 
 ---
 
-## ðŸŽ¯ The Threat Matrix: Three Concurrent Zero-Days
+ ## The Threat Matrix: Three Concurrent Zero-Days
 
 On September 21, 2026, CISA issued an urgent directive regarding active in-the-wild exploitation targeting modern Linux kernels:
 
@@ -23,7 +23,7 @@ On September 21, 2026, CISA issued an urgent directive regarding active in-the-w
 
 ---
 
-## ðŸ§  Architectural Defense-in-Depth
+## Architectural Defense-in-Depth
 
 Rather than treating security as a perimeter wall, the cluster applies a **4-tier layered defense-in-depth model** spanning ring-0 and ring-3:
 
@@ -82,7 +82,7 @@ flowchart TD
 
 ---
 
-## ðŸ› ï¸ Layer 1: Kernel Module Disarmament (`ebtables` Neutralization)
+## Layer 1: Kernel Module Disarmament (`ebtables` Neutralization)
 
 ### First Principles
 In Linux, dynamic kernel modules (`.ko`) can be loaded on-demand by the kernel loader (`kmod`) whenever a process requests a socket family or network table that is not yet resident in ring-0 memory. 
@@ -121,7 +121,7 @@ The kernel module cannot be injected into ring-0 under any unprivileged or privi
 
 ---
 
-## ðŸ”¬ Layer 2: Declarative Modern eBPF Telemetry & Syscall Interception
+## Layer 2: Declarative Modern eBPF Telemetry & Syscall Interception
 
 ### First Principles
 The Linux Crypto API exposes a netlink socket interface (`AF_ALG`, domain family `38`) allowing userspace applications to request kernel-accelerated cryptographic cipher transformations. Because legitimate cloud-native workloads, microservices, and web servers utilize userspace cryptographic libraries (OpenSSL, BoringSSL, Rustls), any container allocating `socket(AF_ALG, ...)` is an anomalous indicator of an exploit payload attempting integer truncation.
@@ -177,7 +177,7 @@ By enforcing `falco.base_syscalls.custom_set: ['!openat']`, we instruct the eBPF
 
 ---
 
-## ðŸ§¬ Layer 3: Container Runtime User Namespace Isolation (The Containment Barrier)
+## Layer 3: Container Runtime User Namespace Isolation (The Containment Barrier)
 
 ### First Principles
 What happens if an exploit bypasses eBPF detection or targets an unknown zero-day in an unblacklisted subsystem? 
@@ -244,7 +244,7 @@ If an adversary alters even a single bit in record #100, the hash verification f
 
 ---
 
-## ðŸ§ª Empirical Live Attestation & Verification
+## Empirical Live Attestation & Verification
 
 To validate that the entire reflex loop operates without human intervention, we executed an intentional, synthetic `AF_ALG` socket probe from an unprivileged environment:
 
@@ -269,7 +269,7 @@ s = socket.socket(38, socket.SOCK_SEQPACKET, 0)
 
 ---
 
-## ðŸ SRE & Systems Architect Takeaways
+## SRE & Systems Architect Takeaways
 
 1. **Compensating Controls Over Latent Vulnerability:** When actively exploited kernel zero-days are disclosed, do not wait for distro package builds. Deploy userspace and kernel loader compensating controls immediately.
 2. **Modprobe Overrides are Definitive:** Simple blacklisting is insufficient against modern loaders. Enforce `/bin/true` execution overrides in `/etc/modprobe.d/` to permanently seal legacy subsystems.
