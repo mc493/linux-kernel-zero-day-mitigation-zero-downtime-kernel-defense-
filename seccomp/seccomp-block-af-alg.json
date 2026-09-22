@@ -1,0 +1,24 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": [
+    "SCMP_ARCH_X86_64",
+    "SCMP_ARCH_X86",
+    "SCMP_ARCH_AARCH64"
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "socket"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "Synchronously block AF_ALG Netlink crypto sockets (domain 38) to prevent CVE-2025-39964 in unpatched kernels",
+      "args": [
+        {
+          "index": 0,
+          "value": 38,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    }
+  ]
+}

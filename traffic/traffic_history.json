@@ -1,0 +1,23 @@
+{
+  "badge_hits": 1187,
+  "daily_clones": {
+    "2026-09-23": {
+      "count": 207,
+      "uniques": 87
+    }
+  },
+  "daily_views": {
+    "2026-09-23": {
+      "count": 379,
+      "uniques": 199
+    }
+  },
+  "first_recorded": "2026-09-22T15:37:05.353038+00:00",
+  "forks": 0,
+  "last_updated": "2026-09-26T03:46:37.330591+00:00",
+  "open_issues": 0,
+  "referrers": {},
+  "repository": "mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-",
+  "stars": 2,
+  "watchers": 0
+}
