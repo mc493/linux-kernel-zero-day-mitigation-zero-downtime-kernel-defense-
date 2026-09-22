@@ -1,4 +1,4 @@
- Zero-Downtime Linux Kernel Zero-Day Defense: Neutralizing CISA Active Exploits with Modern eBPF, Module Disarmament, and User Namespaces
+# Zero-Downtime Linux Kernel Zero-Day Defense: Neutralizing CISA Active Exploits with Modern eBPF, Module Disarmament, and User Namespaces
 
 When the Cybersecurity and Infrastructure Security Agency (CISA) adds critical Linux kernel vulnerabilities to its **Known Exploited Vulnerabilities (KEV)** catalog, an urgent clock starts ticking for every infrastructure team and SRE lead in the world:
 
@@ -11,7 +11,7 @@ This engineering case study documents the **First Principles, Architectural Impl
 
 ---
 
- ## The Threat Matrix: Three Concurrent Zero-Days
+## The Threat Matrix: Three Concurrent Zero-Days
 
 On September 21, 2026, CISA issued an urgent directive regarding active in-the-wild exploitation targeting modern Linux kernels:
 
