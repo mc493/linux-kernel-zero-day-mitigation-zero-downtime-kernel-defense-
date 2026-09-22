@@ -5,16 +5,35 @@
 # ==============================================================================
 set -euo pipefail
 
+# Detect privilege elevator
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+    else
+        echo "❌ Error: Root privileges required, but sudo is not installed."
+        exit 1
+    fi
+fi
+
+# Detect Immutable OS (Read-Only root filesystem)
+IS_RO=false
+if grep -q " / .* ro," /proc/mounts 2>/dev/null; then
+    IS_RO=true
+    echo "ℹ️  Detected read-only root filesystem. Temporarily remounting rw..."
+    $SUDO mount -o remount,rw /
+fi
+
 echo "🛡️ [1/3] Evicting active ebtables modules from kernel RAM..."
 for mod in ebtable_nat ebtable_filter ebtable_broute ebt_snat ebt_dnat ebt_arpreply ebtables; do
     if lsmod | grep -q -E "^${mod} "; then
         echo "  - Unloading active module: ${mod}"
-        sudo modprobe -r "${mod}" 2>/dev/null || echo "    ⚠️ Could not unload ${mod} (in use by active bridge or child dependency)"
+        $SUDO modprobe -r "${mod}" 2>/dev/null || echo "    ⚠️ Could not unload ${mod} (in use by active bridge or child dependency)"
     fi
 done
 
 echo "🛡️ [2/3] Sealing kernel loader via /etc/modprobe.d/blacklist-ebtables.conf..."
-sudo tee /etc/modprobe.d/blacklist-ebtables.conf > /dev/null << 'EOF'
+$SUDO tee /etc/modprobe.d/blacklist-ebtables.conf > /dev/null << 'EOF'
 # Mitigation for CVE-2026-53266: Netfilter ARP table corruption
 # Force all module load requests to exit successfully with 0 without loading code into ring-0
 install ebtables /bin/true
@@ -31,6 +50,13 @@ blacklist ebt_snat
 blacklist ebt_arpreply
 EOF
 
+# Re-lock filesystem if previously read-only
+if [ "$IS_RO" = true ]; then
+    sync
+    $SUDO mount -o remount,ro /
+    echo "  - Re-locked root filesystem in read-only mode."
+fi
+
 echo "🛡️ [3/3] Verifying kernel state..."
 if lsmod | grep -q -E "^ebt"; then
     echo "⚠️ Warning: Some ebtables modules remain resident in memory:"
@@ -41,7 +67,7 @@ else
 fi
 
 # Verify loader override
-sudo modprobe ebt_snat 2>/dev/null || true
+$SUDO modprobe ebt_snat 2>/dev/null || true
 if lsmod | grep -q -E "^ebt"; then
     echo "❌ Error: Module loader override failed!"
     exit 1

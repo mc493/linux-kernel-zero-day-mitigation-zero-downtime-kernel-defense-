@@ -7,7 +7,11 @@
 set -u
 
 FAILURES=0
-AUDIT_LOG="${AUDIT_LOG:-/mnt/mem/palace/security_vault/audit_chain.jsonl}"
+DEFAULT_AUDIT_LOG="./vault/audit_chain.jsonl"
+if [ ! -f "$DEFAULT_AUDIT_LOG" ] && [ -f "/mnt/mem/palace/security_vault/audit_chain.jsonl" ]; then
+    DEFAULT_AUDIT_LOG="/mnt/mem/palace/security_vault/audit_chain.jsonl"
+fi
+AUDIT_LOG="${AUDIT_LOG:-$DEFAULT_AUDIT_LOG}"
 
 echo "========================================================================"
 echo "🛡️  ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE"
@@ -15,7 +19,11 @@ echo "========================================================================"
 
 # Test 1: ebtables module blockade & RAM residency check
 echo -n "[Test 1/3] ebtables module loader blockade & RAM state: "
-sudo modprobe ebt_snat 2>/dev/null || true
+if command -v sudo >/dev/null 2>&1; then
+    sudo -n modprobe ebt_snat 2>/dev/null || modprobe ebt_snat 2>/dev/null || true
+else
+    modprobe ebt_snat 2>/dev/null || true
+fi
 if lsmod | grep -q -E "^ebt"; then
     echo "❌ FAILED"
     echo "  -> Modules matching '^ebt' remain active in kernel memory:"
@@ -34,12 +42,19 @@ try:
     print('PROBE_TRIGGERED')
 except PermissionError:
     print('BLOCKED_BY_SECCOMP')
+except OSError as e:
+    if getattr(e, 'errno', None) == 97:
+        print('UNSUPPORTED_BY_KERNEL')
+    else:
+        print(f'ERROR: {e}')
 except Exception as e:
     print(f'ERROR: {e}')
 ")
 
 if [ "$TEST2_OUTPUT" = "BLOCKED_BY_SECCOMP" ]; then
     echo "✅ PASSED (Synchronously blocked by SECCOMP profile: EACCES)"
+elif [ "$TEST2_OUTPUT" = "UNSUPPORTED_BY_KERNEL" ]; then
+    echo "✅ PASSED (Subsystem not compiled into kernel: EAFNOSUPPORT)"
 elif [ "$TEST2_OUTPUT" = "PROBE_TRIGGERED" ]; then
     echo "⚠️ TRIGGERED (Syscall executed)"
     # If audit ledger is present, assert that the alert was recorded

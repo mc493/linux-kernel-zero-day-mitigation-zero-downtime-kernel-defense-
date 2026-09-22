@@ -267,7 +267,7 @@ s = socket.socket(38, socket.SOCK_SEQPACKET, 0)
 5. **Ledger Sealing (12ms):** Audit daemon appends record to the SHA-256 cryptographic chain.
 6. **Cryptographic Validation:**
    ```bash
-   $ python3 fsm_audit_vault.py --verify
+   $ python3 vault/audit_vault.py --verify
    # Verified 386,213 records. Zero tampering detected.
    ```
 
@@ -278,6 +278,9 @@ s = socket.socket(38, socket.SOCK_SEQPACKET, 0)
 This repository includes production-ready configurations for immediate deployment:
 
 ```text
+|-- .github/
+|   \-- workflows/
+|       \-- traffic-archive.yml         # Automated 360-degree daily telemetry archiver
 |-- etc/
 |   \-- modprobe.d/
 |       \-- blacklist-ebtables.conf     # Modprobe loader override
@@ -287,10 +290,14 @@ This repository includes production-ready configurations for immediate deploymen
 |-- k8s/
 |   \-- pod-userns-hardened.yaml        # containerd v2.2.4 UserNS manifest
 |-- scripts/
+|   |-- archive_traffic.py              # Telemetry snapshot & historical merger
 |   |-- evict-and-harden.sh             # Two-step module eviction & sealing
 |   \-- verify-mitigation.sh            # Automated verification & CI test suite
 |-- seccomp/
 |   \-- seccomp-block-af-alg.json       # Inline SECCOMP blocking profile (EACCES)
+|-- traffic/
+|   |-- SUMMARY.md                      # Human-readable telemetry scorecard
+|   \-- traffic_history.json            # Permanent append-only JSON ledger
 |-- vault/
 |   \-- audit_vault.py                  # Cryptographic SHA-256 hash-chain engine
 |-- README.md
