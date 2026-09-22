@@ -316,5 +316,6 @@ This repository includes production-ready configurations for immediate deploymen
 
 ---
 
-*Maintained by the Sovereign Systems & Security Architecture Team.*  
-*Production-Tested on Linux HWE & Kubernetes CRI v1.30 (containerd v2.2+).*
+*Created & tested on a 5-node bare-metal cluster (Linux HWE & containerd v2.2+).*  
+*Feedback, bug reports, and edge-case testing from the community are warmly welcome!*
+
