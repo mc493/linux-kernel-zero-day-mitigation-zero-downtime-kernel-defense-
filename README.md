@@ -11,19 +11,19 @@ This case study documents a **defense-in-depth compensating control framework** 
 
 ---
 
-## ðŸŽ¯ Threat Matrix & Defense Taxonomy
+## Threat Matrix & Defense Taxonomy
 
 To ensure operational accuracy, defenses are categorized strictly by their security properties (**Prevention**, **Runtime Detection**, and **Containment**):
 
 | Vulnerability | Subsystem | Attack Mechanism | Severity | Defense Mode | Implementation Mechanism |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **CVE-2026-53266** | Netfilter Bridging (`ebtables`) | Arithmetic overflow in bridge ARP table rewrite rules | **High (Memory Corruption)** | ðŸ›‘ **Prevention (Disarmament)** | RAM eviction (`modprobe -r`) + loader override (`/bin/true`) |
-| **CVE-2025-39964** | Crypto Netlink (`AF_ALG`) | Integer truncation in netlink crypto socket allocation | **High (LPE / Breakout)** | ðŸ‘ï¸ **Detection (eBPF) / Gating** | Modern eBPF (`sys_enter_socket`, domain 38) + SECCOMP |
-| **CVE-2025-39682** | Kernel TLS (`kTLS`) | Zero-length record processing flaw in TCP ULP | **High (Kernel Panic / Heap)** | ðŸ‘ï¸ **Detection (eBPF)** | Modern eBPF (`sys_enter_setsockopt`, `TCP_ULP` 31 & `SOL_TLS` 282) |
+| **CVE-2026-53266** | Netfilter Bridging (`ebtables`) | Arithmetic overflow in bridge ARP table rewrite rules | **High (Memory Corruption)** | **Prevention (Disarmament)** | RAM eviction (`modprobe -r`) + loader override (`/bin/true`) |
+| **CVE-2025-39964** | Crypto Netlink (`AF_ALG`) | Integer truncation in netlink crypto socket allocation | **High (LPE / Breakout)** |  **Detection (eBPF) / Gating** | Modern eBPF (`sys_enter_socket`, domain 38) + SECCOMP |
+| **CVE-2025-39682** | Kernel TLS (`kTLS`) | Zero-length record processing flaw in TCP ULP | **High (Kernel Panic / Heap)** |  **Detection (eBPF)** | Modern eBPF (`sys_enter_setsockopt`, `TCP_ULP` 31 & `SOL_TLS` 282) |
 
 ---
 
-## ðŸ§  Layered Defense-in-Depth Architecture
+## Layered Defense-in-Depth Architecture
 
 ```mermaid
 flowchart TD
@@ -41,12 +41,12 @@ flowchart TD
         SyscallTrap --> Tracepoint
         
         subgraph eBPFEngine ["Modern eBPF Detection (CO-RE Ring Buffer)"]
-            Filter{"Syscall Gating:\nâ€¢ domain == 38 (AF_ALG)\nâ€¢ SOL_TCP + TCP_ULP\nâ€¢ SOL_TLS (282)"}
+            Filter{"Syscall Gating:\n- domain == 38 (AF_ALG)\n- SOL_TCP + TCP_ULP\n- SOL_TLS (282)"}
             Tracepoint --> Filter
         end
         
         Disarmed["Modprobe Hook: /bin/true\n(ebtables evicted & blocked)"]
-        UserNS["containerd v2.2.4 User Namespace Remap\nContainer UID 0 âž” Host UID 4050714624\n(Bounded Credential Containment)"]
+        UserNS["containerd v2.2.4 User Namespace Remap\nContainer UID 0 -> Host UID 4050714624\n(Bounded Credential Containment)"]
         
         Filter -- "Match (<1ms)" --> AlertRingBuf["Ring Buffer Emission"]
         Filter -- "Pass" --> KernelExec["Normal Execution Path"]
@@ -80,7 +80,7 @@ flowchart TD
 
 ---
 
-## ðŸ› ï¸ Layer 1: Kernel Module Disarmament (Preventative)
+## Layer 1: Kernel Module Disarmament (Preventative)
 
 ### 1. The Operational Nuance: Active Memory vs. Future Probing
 A common pitfall with `/etc/modprobe.d/` overrides is that `install /bin/true` only blocks **subsequent** module load attempts. If bridge networking (Docker, legacy CNI) loaded `ebtables` earlier in the host lifecycle, the vulnerable code remains active in kernel RAM.
@@ -122,7 +122,7 @@ $ lsmod | grep ebt
 
 ---
 
-## ðŸ”¬ Layer 2: eBPF Syscall Telemetry & Behavioral Gating (Detection)
+## Layer 2: eBPF Syscall Telemetry & Behavioral Gating (Detection)
 
 ### 1. Detection vs. Inline Prevention
 * **Falco eBPF (Asynchronous EDR):** Hooks `sys_enter` via modern eBPF ring buffers, providing sub-millisecond alerting into SIEM/NATS. It is optimized for zero-overhead visibility without modifying kernel control flow.
@@ -188,7 +188,7 @@ If in-container workloads must be strictly prohibited from calling `AF_ALG`, app
 
 ---
 
-## ðŸ§¬ Layer 3: User Namespace Isolation (Containment)
+## Layer 3: User Namespace Isolation (Containment)
 
 ### 1. Bounded Escalation vs. Arbitrary Ring-0 Write
 * **Bounded Privilege Escalation:** Most Netlink/socket LPEs exploit kernel logic flaws to acquire `root` within the process credential struct (`current->cred`).
@@ -217,7 +217,7 @@ $ cat /proc/$(pgrep -f hardened-workload)/uid_map
 
 ---
 
-## â›“ï¸ Layer 4: Cryptographically Tamper-Evident Audit Chaining
+## Layer 4: Cryptographically Tamper-Evident Audit Chaining
 
 ### 1. Tamper-Evidence vs. Hardware WORM
 Local log files on a compromised host can theoretically be modified if an attacker gains unrestricted ring-0 execution. True immutability requires either write-once physical media or cryptographic distribution:
@@ -243,7 +243,7 @@ Local log files on a compromised host can theoretically be modified if an attack
 
 ---
 
-## ðŸ§ª Empirical Verification & Telemetry
+## Empirical Verification & Telemetry
 
 Validation was conducted using a synthetic `AF_ALG` socket allocation in an unprivileged test container:
 
@@ -267,28 +267,28 @@ s = socket.socket(38, socket.SOCK_SEQPACKET, 0)
 
 ---
 
-## ðŸ“ Repository Structure & Deployable Artifacts
+## Repository Structure & Deployable Artifacts
 
 This repository includes production-ready configurations for immediate deployment:
 
 ```text
-â”œâ”€â”€ etc/
-â”‚   â””â”€â”€ modprobe.d/
-â”‚       â””â”€â”€ blacklist-ebtables.conf     # Modprobe loader override
-â”œâ”€â”€ helm/
-â”‚   â””â”€â”€ falco-rules-kernel-cve.yaml     # Falco modern eBPF rules (CO-RE)
-â”œâ”€â”€ k8s/
-â”‚   â””â”€â”€ pod-userns-hardened.yaml        # containerd v2.2.4 UserNS manifest
-â”œâ”€â”€ scripts/
-â”‚   â”œâ”€â”€ evict-and-harden.sh             # Two-step module eviction & sealing
-â”‚   â””â”€â”€ verify-mitigation.sh            # Automated verification probe
-â”œâ”€â”€ README.md
-â””â”€â”€ LICENSE
+|-- etc/
+|   \-- modprobe.d/
+|       \-- blacklist-ebtables.conf     # Modprobe loader override
+|-- helm/
+|   \-- falco-rules-kernel-cve.yaml     # Falco modern eBPF rules (CO-RE)
+|-- k8s/
+|   \-- pod-userns-hardened.yaml        # containerd v2.2.4 UserNS manifest
+|-- scripts/
+|   |-- evict-and-harden.sh             # Two-step module eviction & sealing
+|   \-- verify-mitigation.sh            # Automated verification probe
+|-- README.md
+\-- LICENSE
 ```
 
 ---
 
-## ðŸ SRE & Systems Architect Takeaways
+## SRE & Systems Architect Takeaways
 
 1. **Compensating Controls Bridge the Patch Gap:** When active kernel zero-days are weaponized, deploy loader and runtime controls immediately while waiting for upstream distro package verification.
 2. **Active Module Eviction is Mandatory:** Modprobe overrides only affect future loader requests; always verify running memory via `lsmod` and explicitly evict resident modules (`modprobe -r`).
