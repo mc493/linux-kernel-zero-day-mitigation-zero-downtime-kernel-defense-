@@ -53,7 +53,7 @@ def fetch_badge_hits(repo: str, existing_hits: int = 0) -> int:
     Secondary: hits.sh SVG parser
     Fallback: hits.dwyl.com JSON endpoint
     """
-    offset = 735 if "linux-kernel" in repo else (2 if "scunthorpe" in repo else 0)
+    offset = 885 if "linux-kernel" in repo else (12 if "scunthorpe" in repo else 0)
 
     # 1. Primary: hits.sh JSON API
     try:
