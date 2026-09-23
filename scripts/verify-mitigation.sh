@@ -14,7 +14,7 @@ fi
 AUDIT_LOG="${AUDIT_LOG:-$DEFAULT_AUDIT_LOG}"
 
 echo "========================================================================"
-echo "🛡️  ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE"
+echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE"
 echo "========================================================================"
 
 # Test 1: ebtables module blockade & RAM residency check
@@ -25,12 +25,12 @@ else
     modprobe ebt_snat 2>/dev/null || true
 fi
 if lsmod | grep -q -E "^ebt"; then
-    echo "❌ FAILED"
+    echo "[FAIL] FAILED"
     echo "  -> Modules matching '^ebt' remain active in kernel memory:"
     lsmod | grep -E "^ebt"
     FAILURES=$((FAILURES + 1))
 else
-    echo "✅ PASSED (0 modules resident in RAM)"
+    echo "[PASS] PASSED (0 modules resident in RAM)"
 fi
 
 # Test 2: AF_ALG crypto socket probe & assertion
@@ -52,26 +52,26 @@ except Exception as e:
 ")
 
 if [ "$TEST2_OUTPUT" = "BLOCKED_BY_SECCOMP" ]; then
-    echo "✅ PASSED (Synchronously blocked by SECCOMP profile: EACCES)"
+    echo "[PASS] PASSED (Synchronously blocked by SECCOMP profile: EACCES)"
 elif [ "$TEST2_OUTPUT" = "UNSUPPORTED_BY_KERNEL" ]; then
-    echo "✅ PASSED (Subsystem not compiled into kernel: EAFNOSUPPORT)"
+    echo "[PASS] PASSED (Subsystem not compiled into kernel: EAFNOSUPPORT)"
 elif [ "$TEST2_OUTPUT" = "PROBE_TRIGGERED" ]; then
-    echo "⚠️ TRIGGERED (Syscall executed)"
+    echo "[WARN] TRIGGERED (Syscall executed)"
     # If audit ledger is present, assert that the alert was recorded
     if [ -f "$AUDIT_LOG" ]; then
         echo -n "  -> Checking cryptographic audit ledger for alert: "
         sleep 1
         if tail -n 20 "$AUDIT_LOG" | grep -q "AF_ALG"; then
-            echo "✅ PASSED (Alert verified in hash chain)"
+            echo "[PASS] PASSED (Alert verified in hash chain)"
         else
-            echo "❌ FAILED (Syscall executed but no alert found in audit ledger)"
+            echo "[FAIL] FAILED (Syscall executed but no alert found in audit ledger)"
             FAILURES=$((FAILURES + 1))
         fi
     else
         echo "  -> Note: Set AUDIT_LOG to verify end-to-end ledger propagation."
     fi
 else
-    echo "⚠️ Unknown state: $TEST2_OUTPUT"
+    echo "Warning: Unknown state: $TEST2_OUTPUT"
 fi
 
 # Test 3: kTLS TCP_ULP setsockopt probe & assertion
@@ -91,25 +91,25 @@ finally:
 ")
 
 if [ "$TEST3_OUTPUT" = "BLOCKED_BY_POLICY" ]; then
-    echo "✅ PASSED (Synchronously blocked by policy)"
+    echo "[PASS] PASSED (Synchronously blocked by policy)"
 elif [ "$TEST3_OUTPUT" = "PROBE_TRIGGERED" ] || [ "$TEST3_OUTPUT" = "EXPECTED_RETURN" ]; then
-    echo "⚠️ TRIGGERED (Socket option evaluated)"
+    echo "[WARN] TRIGGERED (Socket option evaluated)"
     if [ -f "$AUDIT_LOG" ]; then
         echo -n "  -> Checking cryptographic audit ledger for kTLS alert: "
         sleep 1
         if tail -n 20 "$AUDIT_LOG" | grep -q -E "kTLS|TCP_ULP"; then
-            echo "✅ PASSED (Alert verified in hash chain)"
+            echo "[PASS] PASSED (Alert verified in hash chain)"
         else
-            echo "ℹ️ Note: Evaluation completed."
+            echo "Notice: Evaluation completed."
         fi
     fi
 fi
 
 echo "========================================================================"
 if [ "$FAILURES" -eq 0 ]; then
-    echo "🏆 ALL VERIFICATION ASSERTIONS PASSED (Exit code: 0)"
+    echo "[SUCCESS] ALL VERIFICATION ASSERTIONS PASSED (Exit code: 0)"
     exit 0
 else
-    echo "❌ $FAILURES TEST(S) FAILED (Exit code: $FAILURES)"
+    echo "[FAIL] $FAILURES TEST(S) FAILED (Exit code: $FAILURES)"
     exit "$FAILURES"
 fi

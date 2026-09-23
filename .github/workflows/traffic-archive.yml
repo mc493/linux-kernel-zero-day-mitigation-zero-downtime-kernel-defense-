@@ -1,4 +1,4 @@
-name: 📊 360° Repository Traffic & Telemetry Archival
+name: 360° Repository Traffic & Telemetry Archival
 
 on:
   schedule:

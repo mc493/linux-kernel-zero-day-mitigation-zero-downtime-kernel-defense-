@@ -72,7 +72,7 @@ def append_record(vault_path: str, topic: str, data: dict) -> dict:
 def verify_chain(vault_path: str) -> bool:
     """Verifies complete cryptographic integrity of the hash chain."""
     if not os.path.exists(vault_path):
-        print(f"❌ Error: Vault file not found at {vault_path}")
+        print(f"Error: Vault file not found at {vault_path}")
         return False
 
     prev_hash = GENESIS_HASH
@@ -87,7 +87,7 @@ def verify_chain(vault_path: str) -> bool:
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError as e:
-                print(f"❌ Corrupted JSON at line {line_num}: {e}")
+                print(f"Corrupted JSON at line {line_num}: {e}")
                 return False
                 
             idx = rec.get("index")
@@ -99,7 +99,7 @@ def verify_chain(vault_path: str) -> bool:
             
             # Verify backward pointer
             if p_hash != prev_hash:
-                print(f"❌ Chain Break at index {idx} (line {line_num})!")
+                print(f"Chain Break at index {idx} (line {line_num})!")
                 print(f"   Expected prev_hash: {prev_hash}")
                 print(f"   Recorded prev_hash: {p_hash}")
                 return False
@@ -107,7 +107,7 @@ def verify_chain(vault_path: str) -> bool:
             # Verify self digest
             computed = compute_record_hash(idx, ts, topic, data, p_hash)
             if computed != curr_hash:
-                print(f"❌ Digest Mismatch at index {idx} (line {line_num})!")
+                print(f"Digest Mismatch at index {idx} (line {line_num})!")
                 print(f"   Recorded: {curr_hash}")
                 print(f"   Computed: {computed}")
                 return False
@@ -115,7 +115,7 @@ def verify_chain(vault_path: str) -> bool:
             prev_hash = curr_hash
             record_count += 1
 
-    print(f"✅ Cryptographic chain verified clean across {record_count:,} records.")
+    print(f"[OK] Cryptographic chain verified clean across {record_count:,} records.")
     print(f"   Head Hash: {prev_hash}")
     return True
 
@@ -136,11 +136,11 @@ def main():
         try:
             data = json.loads(args.append)
         except json.JSONDecodeError as e:
-            print(f"❌ Invalid JSON payload: {e}")
+            print(f"Invalid JSON payload: {e}")
             sys.exit(1)
             
         rec = append_record(args.vault_file, args.topic, data)
-        print(f"✅ Record #{rec['index']} committed: {rec['hash']}")
+        print(f"[OK] Record #{rec['index']} committed: {rec['hash']}")
         sys.exit(0)
     else:
         parser.print_help()

@@ -6,7 +6,7 @@ This directory contains production-tested Helm values for deploying modern eBPF 
 
 ---
 
-## 🚀 One-Line Deployment
+## One-Line Deployment
 
 Deploy or upgrade Falco across all cluster nodes using the modern eBPF driver:
 
@@ -19,7 +19,7 @@ helm upgrade --install falco falcosecurity/falco \
 
 ---
 
-## 🔍 Verification
+## Verification
 
 Verify all DaemonSet pods are running with 0 restarts:
 

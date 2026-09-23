@@ -4,6 +4,7 @@
 [![Kernel: Linux HWE](https://img.shields.io/badge/Kernel-Linux%20HWE%206.8%2B%20%7C%207.0%2B-informational.svg)](https://kernel.org)
 [![Kubernetes: CRI v1.30+](https://img.shields.io/badge/Kubernetes-CRI%20v1.30%2B-brightgreen.svg)](https://kubernetes.io)
 [![eBPF: Falco modern_ebpf](https://img.shields.io/badge/eBPF-Falco%20v0.44%2B-orange.svg)](https://falco.org)
+[![Engineered With: Antigravity CLI](https://img.shields.io/badge/Engineered%20With-Antigravity%20CLI%20(agy)-black?style=flat-square)](https://github.com/)
 [![Views](https://hits.sh/github.com/mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-.svg?style=flat-square&label=views&extraCount=885)](traffic/SUMMARY.md)
 
 When the Cybersecurity and Infrastructure Security Agency (CISA) adds critical Linux kernel vulnerabilities to its **Known Exploited Vulnerabilities (KEV)** catalog, an urgent operational clock starts ticking for infrastructure teams and SRE leads:
@@ -316,6 +317,14 @@ This repository includes production-ready configurations for immediate deploymen
 
 ---
 
+## Engineering & Maintainers
+
+* **Lead Systems Architect:** [@mc493](https://github.com/mc493) — Kernel Defense Architecture, Bare-Metal Testbed Validation & Production Deployment.
+* **Autonomous Engineering Agent:** **Antigravity CLI (`agy`)** — Agentic Pair-Programming, Cross-Node Orchestration, and Formal Verification Harness.
+
+---
+
 *Created & tested on a 5-node bare-metal cluster (Linux HWE & containerd v2.2+).*  
 *Feedback, bug reports, and edge-case testing from the community are warmly welcome!*
+
 
