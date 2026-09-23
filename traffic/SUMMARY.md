@@ -27,11 +27,14 @@
 
 ---
 
-## 🌐 Top Referring Domains
+## 🌐 Top Referring Domains & Verified Syndications
 
-| Referrer | Views (Total) | Visitors (Unique) |
-| :--- | :---: | :---: |
-| *No external referrers recorded yet* | 0 | 0 |
+| Platform / Referrer | Type | Details / URL | Status |
+| :--- | :--- | :--- | :---: |
+| **Hacker News (Y Combinator)** | Community Discussion | [Story #49806050](https://news.ycombinator.com/item?id=49806050) (9 points, Newest/Rising queue) | 🟢 Primary Traffic Driver |
+| **FastNexa CyberBrief** | CTI Threat Feed | [CyberBrief Article](https://www.fastnexa.com/cyberbrief/news/zero-downtime-linux-kernel-zero-day-mitigation-via-ebpf-and-seccomp-83f06ffe) | 🟢 Syndicated & Backlinked |
+| **The Free Speech Network** | Tech News Aggregator | [Tech Feed](https://thefreespeechnetwork.com/zero-downtime-linux-kernel-zero-day-mitigation-via-ebpf-and-seccomp/) | 🟢 Syndicated & Backlinked |
+| **HckrNews** | Real-Time HN Tracker | Automated RSS / Top Stories scraper | 🟢 Ingested |
 
 ---
 
