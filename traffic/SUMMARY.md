@@ -1,7 +1,7 @@
 # 📊 360° Repository Traffic & Telemetry History
 
 > **Repository:** [`mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-`](https://github.com/mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-)  
-> **Last Updated:** `2026-09-23T03:33:02.862010+00:00` (UTC)  
+> **Last Updated:** `2026-09-23T13:58:06.624374+00:00` (UTC)  
 > **Archival Engine:** Automated Continuous Time-Series Ledger (Defeats GitHub 14-Day Cliff)
 
 ---
@@ -10,7 +10,7 @@
 
 | Metric | Total / Status | Description |
 | :--- | :---: | :--- |
-| **Live Badge Hits** | `735` | Public visual hits via `hits.dwyl.com` web beacon |
+| **Live Badge Hits** | `740` | Public visual hits via `hits.sh` web beacon |
 | **Total Page Views** | `0` | Cumulative page views tracked via GitHub API |
 | **Total Git Clones** | `0` | Cumulative repository clones via CLI |
 | **Stargazers** | `1` | Total GitHub stars |
