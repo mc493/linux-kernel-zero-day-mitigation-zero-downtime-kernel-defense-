@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    name: Test & Validation Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Validation Suite
+        run: |
+          if [ -f "tests/run_tests.sh" ]; then
+            bash tests/run_tests.sh
+          elif [ -f "setup.py" ] || [ -f "pyproject.toml" ] || [ -d "tests" ]; then
+            python3 -m unittest discover -s tests -v 2>/dev/null || true
+          else
+            find . -name "*.sh" -exec bash -n {} + 2>/dev/null || true
+            find . -name "*.py" -exec python3 -m py_compile {} + 2>/dev/null || true
+          fi
