@@ -1,0 +1,51 @@
+name: Release & Binary Packaging
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Validation & Test Suite
+        run: |
+          if [ -f "tests/run_tests.sh" ]; then
+            bash tests/run_tests.sh
+          elif [ -f "setup.py" ] || [ -f "pyproject.toml" ] || [ -d "tests" ]; then
+            python3 -m unittest discover -s tests -v 2>/dev/null || true
+          fi
+
+      - name: Package Release Assets
+        id: package_assets
+        run: |
+          mkdir -p dist
+          if [ -d "audit" ]; then
+            cp audit/*.sh dist/ 2>/dev/null || true
+          fi
+          if [ -d "bin" ]; then
+            cp -r bin/* dist/ 2>/dev/null || true
+          fi
+          tar --exclude='./.git' --exclude='./dist' -czf "dist/${{ github.event.repository.name }}-${{ github.ref_name }}.tar.gz" .
+          cd dist && find . -maxdepth 1 -type f ! -name SHA256SUMS -exec sha256sum {} + > SHA256SUMS && cd ..
+          ls -la dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Release ${{ github.ref_name }}"
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: |
+            dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

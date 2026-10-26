@@ -1,5 +1,6 @@
 # Zero-Downtime Linux Kernel Zero-Day Defense: Layered Compensating Controls via eBPF Telemetry, Module Disarmament, and User Namespaces
 
+[![Release](https://img.shields.io/github/v/release/mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-?color=blue&label=Release)](https://github.com/mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Kernel: Linux HWE](https://img.shields.io/badge/Kernel-Linux%20HWE%206.8%2B%20%7C%207.0%2B-informational.svg)](https://kernel.org)
 [![Kubernetes: CRI v1.30+](https://img.shields.io/badge/Kubernetes-CRI%20v1.30%2B-brightgreen.svg)](https://kubernetes.io)
