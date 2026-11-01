@@ -73,26 +73,85 @@ else
     echo "Warning: Unknown state: $TEST2_OUTPUT"
 fi
 
-# Test 3: kTLS TCP_ULP setsockopt probe & assertion
-echo -n "[Test 3/3] kTLS TCP_ULP setsockopt (SOL_TCP=6, TCP_ULP=31) probe: "
+# Test 3: kTLS Two-Phase Runtime Probe (Phase 1: TCP_ULP=31, Phase 2: SOL_TLS=282)
+echo -n "[Test 3/3] kTLS Two-Phase runtime probe (Phase 1: TCP_ULP=31, Phase 2: SOL_TLS=282): "
 TEST3_OUTPUT=$(python3 -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+import socket, threading, struct, errno, sys
+
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(('127.0.0.1', 0))
+srv.listen(1)
+port = srv.getsockname()[1]
+
+active_conn = None
+def accept():
+    global active_conn
+    try:
+        active_conn, _ = srv.accept()
+    except Exception:
+        pass
+
+t = threading.Thread(target=accept)
+t.daemon = True
+t.start()
+
+cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+cli.connect(('127.0.0.1', port))
+t.join(timeout=2.0)
+
+p1 = 'UNKNOWN'
+p2 = 'UNKNOWN'
+
+# Phase 1: TCP_ULP attachment (SOL_TCP=6, TCP_ULP=31, 'tls')
 try:
-    s.setsockopt(6, 31, b'tls\0')
-    print('PROBE_TRIGGERED')
+    cli.setsockopt(6, 31, b'tls\0')
+    p1 = 'ATTACHED'
 except PermissionError:
-    print('BLOCKED_BY_POLICY')
-except Exception as e:
-    print('EXPECTED_RETURN')
-finally:
-    s.close()
+    p1 = 'BLOCKED_BY_POLICY'
+except OSError as e:
+    if e.errno in (errno.ENOPROTOOPT, errno.ENOENT):
+        p1 = 'UNSUPPORTED_BY_KERNEL'
+    elif e.errno in (errno.EACCES, errno.EPERM):
+        p1 = 'BLOCKED_BY_POLICY'
+    else:
+        p1 = f'ERR_{e.errno}'
+
+# Phase 2: SOL_TLS crypto initialization (SOL_TLS=282, TLS_TX=1)
+# struct tls12_crypto_info_aes_gcm_128 (40 bytes)
+crypto_info = struct.pack('=HH8s16s4s8s', 0x0303, 51, b'\x01'*8, b'\x02'*16, b'\x03'*4, b'\x00'*8)
+try:
+    cli.setsockopt(282, 1, crypto_info)
+    p2 = 'CONFIGURED'
+except PermissionError:
+    p2 = 'BLOCKED_BY_POLICY'
+except OSError as e:
+    if e.errno in (errno.EACCES, errno.EPERM):
+        p2 = 'BLOCKED_BY_POLICY'
+    elif e.errno == errno.ENOPROTOOPT:
+        p2 = 'UNSUPPORTED_OR_P1_REQUIRED'
+    elif e.errno == errno.EINVAL:
+        p2 = 'REJECTED_INVALID_ARG'
+    else:
+        p2 = f'ERR_{e.errno}'
+
+cli.close()
+if active_conn:
+    active_conn.close()
+srv.close()
+
+print(f'{p1}|{p2}')
 ")
 
-if [ "$TEST3_OUTPUT" = "BLOCKED_BY_POLICY" ]; then
-    echo "[PASS] PASSED (Synchronously blocked by policy)"
-elif [ "$TEST3_OUTPUT" = "PROBE_TRIGGERED" ] || [ "$TEST3_OUTPUT" = "EXPECTED_RETURN" ]; then
-    echo "[WARN] TRIGGERED (Socket option evaluated)"
+P1_RES=$(echo "$TEST3_OUTPUT" | cut -d'|' -f1)
+P2_RES=$(echo "$TEST3_OUTPUT" | cut -d'|' -f2)
+
+if [ "$P1_RES" = "BLOCKED_BY_POLICY" ] || [ "$P2_RES" = "BLOCKED_BY_POLICY" ]; then
+    echo "[PASS] PASSED (Synchronously blocked by policy: P1=$P1_RES, P2=$P2_RES)"
+elif [ "$P1_RES" = "UNSUPPORTED_BY_KERNEL" ]; then
+    echo "[PASS] PASSED (kTLS subsystem not compiled in kernel: P1=$P1_RES)"
+elif [ "$P1_RES" = "ATTACHED" ] || [ "$P2_RES" = "CONFIGURED" ]; then
+    echo "[WARN] TRIGGERED (Two-Phase evaluated: P1=$P1_RES, P2=$P2_RES)"
     if [ -f "$AUDIT_LOG" ]; then
         echo -n "  -> Checking cryptographic audit ledger for kTLS alert: "
         sleep 1
@@ -102,6 +161,8 @@ elif [ "$TEST3_OUTPUT" = "PROBE_TRIGGERED" ] || [ "$TEST3_OUTPUT" = "EXPECTED_RE
             echo "[INFO] UNVERIFIED (No recent kTLS alert in last 200 audit events)"
         fi
     fi
+else
+    echo "Warning: Evaluation state: P1=$P1_RES, P2=$P2_RES"
 fi
 
 echo "========================================================================"

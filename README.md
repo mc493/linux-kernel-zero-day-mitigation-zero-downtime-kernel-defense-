@@ -161,12 +161,12 @@ A critical design requirement in defense-in-depth kernel architecture is maintai
 
 > **Core Invariant:** An asynchronous detection rule (such as Falco eBPF) observes an exploit attempt in flight and triggers automated remediation (e.g. dynamic CrowdSec IP bans or pod isolation), but **does not by itself prevent the underlying syscall from executing**. Synchronous blocking requires SECCOMP or LSM gating.
 
-### 2. Corrected kTLS Syscall Mechanics (Two-Phase Runtime Detection)
-Enabling Kernel TLS on a TCP connection occurs in two distinct phases:
-1. **Phase 1 (Attachment):** `setsockopt(fd, SOL_TCP=6, TCP_ULP=31, "tls", 4)` attaches the Upper Layer Protocol.
-2. **Phase 2 (Configuration):** `setsockopt(fd, SOL_TLS=282, TLS_TX/TLS_RX, ...)` initializes crypto keys.
+### 2. Corrected kTLS Syscall Mechanics (Two-Phase Runtime Detection & Threat Taxonomy)
+Enabling Kernel TLS on a TCP connection occurs in two distinct, sequential phases:
+1. **Phase 1 (Attachment):** `setsockopt(fd, SOL_TCP=6, TCP_ULP=31, "tls", 4)` attaches the Upper Layer Protocol (`icsk_ulp_data`) to an established TCP socket (`TCP_ESTABLISHED`).
+2. **Phase 2 (Configuration):** `setsockopt(fd, SOL_TLS=282, TLS_TX=1/TLS_RX=2, crypto_info)` initializes the cryptographic context.
 
-Filtering solely on `SOL_TLS (282)` misses the ULP attachment phase. The rule evaluates **both** phases:
+Filtering solely on `SOL_TLS (282)` misses Phase 1 ULP attachment entirely. Furthermore, production detection engineering must distinguish between an **Attempted / Rejected Probe** (Indicator of Attack) and a **Confirmed State Transition** (vulnerability exposure):
 
 ```yaml
 # falco-rules-kernel-cve.yaml
@@ -179,14 +179,24 @@ customRules:
       priority: WARNING
       tags: [cve, zero-day, cve-2025-39964, crypto, container_escape]
 
-    - rule: Detect Container Kernel TLS Activation (CVE-2025-39682)
-      desc: Detects container workloads attaching kTLS TCP_ULP or configuring SOL_TLS
-      condition: container.id != host and evt.type = setsockopt and 
+    - rule: Detect Container kTLS Activation Attempt (CVE-2025-39682)
+      desc: Detects container workloads attempting to attach kTLS TCP_ULP or configure SOL_TLS (rejected or failed probe)
+      condition: container.id != host and evt.type = setsockopt and evt.failed = true and 
                  ((evt.rawarg.level = 6 and evt.rawarg.optname = 31) or (evt.rawarg.level = 282))
-      output: "Container kTLS Activation Detected (level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name container=%container.name)"
+      output: "Container kTLS Activation Rejected/Failed (res=%evt.res level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name container=%container.name)"
       priority: WARNING
-      tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp]
+      tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp, reconnaissance]
+
+    - rule: Detect Confirmed Container kTLS Activation (CVE-2025-39682)
+      desc: Detects container workloads successfully binding kTLS TCP_ULP or SOL_TLS into kernel state
+      condition: container.id != host and evt.type = setsockopt and evt.failed = false and 
+                 ((evt.rawarg.level = 6 and evt.rawarg.optname = 31) or (evt.rawarg.level = 282))
+      output: "CRITICAL: Container kTLS Successfully Bound in Kernel (res=%evt.res level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name container=%container.name)"
+      priority: CRITICAL
+      tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp, weaponization]
 ```
+
+> **Threat Taxonomy (Exposure Gate vs. Payload Trigger):** CVE-2025-39682 resides in the kernel software receive path (`tls_sw_recvmsg()` / `rx_list` zero-length TLS records). A `setsockopt` call is the **attack surface expansion gate (precondition)**, not the payload trigger itself. By shutting the door at capability activation, unprivileged containers are blocked from exposing the kernel to the vulnerable receive path.
 
 ### 3. Production Stability: Linux 7.0 ABI Filter Invariant
 On modern Linux kernels (Linux 7.0+ HWE), Falco's userspace inspector engine (`sinsp`) encounters register parsing mismatches on `openat` parameters (`sinsp_exception: could not parse param 2 (name)`). 
@@ -392,6 +402,12 @@ In September 2026, this defense architecture was submitted for independent peer 
 * **Temporal Complementarity:** Compensatory controls and livepatching are not mutually exclusive; they address complementary phases of the zero-day lifecycle:
   * **Day 0 to Day 21 (Pre-Patch Zero-Downtime Defense):** When a zero-day is actively weaponized and vendor security teams have not yet compiled, regression-tested, and signed binary live-patch modules, compensatory mitigations (SECCOMP syscall filtering, modprobe blacklisting, UserNS remapping) can be deployed cluster-wide in minutes without host reboots.
   * **Day 21+ (Formal Livepatch / Distro Rollout):** Once vendor-tested signed `kpatch` modules or upstream kernel errata (`apt-get upgrade`) become available, enterprise SREs deploy the formal livepatch or schedule a rolling node reboot. Compensatory controls safely bridge this critical multi-week exposure window.
+
+### 5. Why Not Inspect `TCP_ULP` Option Strings (`"tls"`) or Trace the Receive Path for CVE-2025-39682?
+* **The Pointer Dereference Constraint:** Peer reviewers frequently ask why SECCOMP or eBPF rules do not inspect the string `"tls"` inside `setsockopt(..., optval)`. In SECCOMP-BPF, `optval` is passed as a virtual memory pointer (`const void *`). Classic SECCOMP filters execute strictly on CPU hardware registers and are architecturally prohibited from dereferencing user pointers to prevent page faults and TOCTOU races in atomic syscall contexts. Scalar integer matching on `level=SOL_TCP(6)` and `optname=TCP_ULP(31)` operates entirely on scalar registers, guaranteeing zero-overhead, race-free evaluation.
+* **Universal Container Invariant:** In cloud microservices, unprivileged container workloads have no legitimate reason to attach *any* TCP Upper Layer Protocol (`tls`, `smc`, `mptcp`). Broadly gating `level=6, optname=31` provides complete defense against both kTLS exploitation and unauthorized transport protocol tampering.
+* **Exposure Gate vs. Payload Execution:** CVE-2025-39682 is triggered in the software receive worker (`tls_sw_recvmsg()` / `rx_list` zero-length records). Tracing high-throughput receive-path packets in kernel space (millions of pkts/sec at 10-40 Gbps) would decimate network I/O performance. Because the receive path is physically unreachable unless a socket has successfully attached kTLS, gating capability activation at `setsockopt` completely neutralizes the exploit vector before network traffic is ever parsed.
+* **Stateless Multi-Stage Defense vs Stateful FD Tracking:** Rather than tracking complex, stateful socket file descriptors across processes (which introduces FD recycling race conditions and memory leaks), evaluating `(Phase 1 OR Phase 2)` statelessly ensures immediate detection if either phase is attempted, while bifurcating alerts into **Reconnaissance Attempts** (`evt.failed = true`, `WARNING`) and **Confirmed Kernel State Transitions** (`evt.failed = false`, `CRITICAL`).
 
 ---
 

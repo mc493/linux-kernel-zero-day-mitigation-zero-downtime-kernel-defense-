@@ -21,12 +21,19 @@ customRules:
       priority: WARNING
       tags: [cve, zero-day, cve-2025-39964, crypto, container_escape]
 
-    - rule: Detect Container Kernel TLS Activation (CVE-2025-39682)
-      desc: Detects container workloads attaching kTLS TCP_ULP or configuring SOL_TLS
-      condition: container.id != host and evt.type = setsockopt and ((evt.rawarg.level = 6 and evt.rawarg.optname = 31) or (evt.rawarg.level = 282))
-      output: "Container kTLS Activation Detected (level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name container=%container.name)"
+    - rule: Detect Container kTLS Activation Attempt (CVE-2025-39682)
+      desc: Detects container workloads attempting to attach kTLS TCP_ULP or configure SOL_TLS (rejected or failed probe)
+      condition: container.id != host and evt.type = setsockopt and evt.failed = true and ((evt.rawarg.level = 6 and evt.rawarg.optname = 31) or (evt.rawarg.level = 282))
+      output: "Container kTLS Activation Rejected/Failed (res=%evt.res level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name container=%container.name)"
       priority: WARNING
-      tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp]
+      tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp, reconnaissance]
+
+    - rule: Detect Confirmed Container kTLS Activation (CVE-2025-39682)
+      desc: Detects container workloads successfully binding kTLS TCP_ULP or SOL_TLS into kernel state
+      condition: container.id != host and evt.type = setsockopt and evt.failed = false and ((evt.rawarg.level = 6 and evt.rawarg.optname = 31) or (evt.rawarg.level = 282))
+      output: "CRITICAL: Container kTLS Successfully Bound in Kernel (res=%evt.res level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name container=%container.name)"
+      priority: CRITICAL
+      tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp, weaponization]
 
 falcosidekick:
   enabled: true
