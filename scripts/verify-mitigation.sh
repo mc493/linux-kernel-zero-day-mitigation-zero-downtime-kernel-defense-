@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # verify-mitigation.sh
-# Automated Zero-Day Compensating Control Verification & CI Gating Suite (v1.3.2)
+# Automated Zero-Day Compensating Control Verification & CI Gating Suite (v1.3.3)
 # Returns exit code 0 on full compliance, >0 on any failure or strict violation.
 # ==============================================================================
 set -u
@@ -41,7 +41,7 @@ AUDIT_LOG="${AUDIT_LOG:-$DEFAULT_AUDIT_LOG}"
 AUDIT_ANCHOR="${AUDIT_ANCHOR:-${AUDIT_LOG}.anchor.json}"
 
 echo "========================================================================"
-echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE (v1.3.2)"
+echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE (v1.3.3)"
 echo "Run Identifier: $RUN_ID"
 if [ "$STRICT_MODE" -eq 1 ]; then
     echo "Mode: STRICT (Zero-tolerance CI gating active; preflight abort on error)"
@@ -247,6 +247,7 @@ else:
             if [ -f "${REPO_ROOT}/vault/audit_vault.py" ] && "${VERIFY_CMD[@]}" >/dev/null 2>&1; then
                 if [ "$MATCH_TYPE" = "EXACT_RUN_MATCH" ]; then
                     echo "[PASS] PASSED (Exact RUN_ID correlated alert verified with unbroken SHA-256 hash chain)"
+                    echo "  -> Exact RUN_ID provenance verified: Producer ($RUN_ID) -> Audit Pipeline -> Cryptographic Ledger Head"
                     DETECTION_PASSED=$((DETECTION_PASSED + 1))
                 else
                     if [ "$STRICT_MODE" -eq 1 ]; then
@@ -451,6 +452,7 @@ else:
             if [ -f "${REPO_ROOT}/vault/audit_vault.py" ] && "${VERIFY_CMD[@]}" >/dev/null 2>&1; then
                 if [ "$MATCH_TYPE" = "EXACT_RUN_MATCH" ]; then
                     echo "[PASS] PASSED (Exact RUN_ID correlated alert verified with unbroken SHA-256 hash chain)"
+                    echo "  -> Exact RUN_ID provenance verified: Producer ($RUN_ID) -> Audit Pipeline -> Cryptographic Ledger Head"
                     DETECTION_PASSED=$((DETECTION_PASSED + 1))
                 else
                     if [ "$STRICT_MODE" -eq 1 ]; then
@@ -493,9 +495,18 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 fi
 
 if [ "$DOCKER_AVAILABLE" -eq 1 ] && [ -f "$SECCOMP_PROFILE" ]; then
-    # Step 4.0: Baseline Control Check (Unconfined Container)
-    BASELINE_P1=$(docker run --rm -e RUN_ID="$RUN_ID" --security-opt seccomp=unconfined "$CONTAINER_IMAGE" python3 -c "
-import socket, threading
+    # Step 4.0: Baseline Control Check (Unconfined Container across all 3 attack surfaces)
+    BASELINE_RAW=$(docker run --rm -e RUN_ID="$RUN_ID" --security-opt seccomp=unconfined "$CONTAINER_IMAGE" python3 -c "
+import socket, threading, struct, errno, sys
+
+b_af = 'UNKNOWN'
+try:
+    s = socket.socket(38, socket.SOCK_SEQPACKET, 0)
+    b_af = 'PERMITTED'
+    s.close()
+except OSError as e:
+    b_af = f'ERR_{e.errno}_{errno.errorcode.get(e.errno, e.errno)}'
+
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(('127.0.0.1', 0))
@@ -512,16 +523,36 @@ t.start()
 cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 cli.connect(('127.0.0.1', port))
 t.join(2.0)
-res = 'FAILED'
+
+b_p1 = 'UNKNOWN'
+b_p2 = 'UNKNOWN'
+
 try:
     cli.setsockopt(6, 31, b'tls\0')
-    res = 'ATTACHED'
-except Exception: pass
+    b_p1 = 'ATTACHED'
+except OSError as e:
+    b_p1 = f'ERR_{e.errno}_{errno.errorcode.get(e.errno, e.errno)}'
+
+if b_p1 == 'ATTACHED':
+    crypto_info = struct.pack('=HH8s16s4s8s', 0x0303, 51, b'\x01'*8, b'\x02'*16, b'\x03'*4, b'\x00'*8)
+    try:
+        cli.setsockopt(282, 1, crypto_info)
+        b_p2 = 'CONFIGURED'
+    except OSError as e:
+        b_p2 = f'ERR_{e.errno}_{errno.errorcode.get(e.errno, e.errno)}'
+else:
+    b_p2 = 'SKIPPED_P1_FAILED'
+
 cli.close()
 if conn: conn.close()
 srv.close()
-print(res)
-" 2>/dev/null || echo "BASELINE_ERROR")
+
+print(f'{b_af}|{b_p1}|{b_p2}')
+" 2>/dev/null || echo "BASELINE_ERROR|BASELINE_ERROR|BASELINE_ERROR")
+
+    BASELINE_AF=$(echo "$BASELINE_RAW" | cut -d'|' -f1)
+    BASELINE_P1=$(echo "$BASELINE_RAW" | cut -d'|' -f2)
+    BASELINE_P2=$(echo "$BASELINE_RAW" | cut -d'|' -f3)
 
     if [ "$BASELINE_P1" != "ATTACHED" ]; then
         if [ "$STRICT_MODE" -eq 1 ]; then
@@ -624,7 +655,7 @@ else:
         SECCOMP_OUTPUT=$(cat "$CONTAINER_OUT")
         if [ "$DOCKER_STATUS" -eq 0 ] && [ "$SECCOMP_OUTPUT" = "ALL_BLOCKED_BY_SECCOMP_FILTER" ]; then
             echo "[PASS] PASSED (AF_ALG, TCP_ULP, SOL_TLS synchronously rejected by SECCOMP: exact EPERM, Seccomp mode=2 verified)"
-            echo "  -> Baseline Contrast: Unconfined container permitted Phase 1 ULP ($BASELINE_P1); custom profile synchronously blocked it."
+            echo "  -> 3-Vector Baseline Contrast: Unconfined (AF_ALG=$BASELINE_AF, Phase 1=$BASELINE_P1, Phase 2=$BASELINE_P2) vs Custom SECCOMP Profile (All 3 vectors synchronously denied with exact EPERM)."
             PREVENTION_PASSED=$((PREVENTION_PASSED + 1))
         elif [ "$DOCKER_STATUS" -ne 0 ]; then
             ERR_SNIPPET=$(head -n 1 "$CONTAINER_ERR")
@@ -768,7 +799,7 @@ fi
 
 TOTAL_PASSED=$((PREVENTION_PASSED + DETECTION_PASSED))
 echo "========================================================================"
-echo "VERIFICATION SUMMARY:"
+echo "VERIFICATION ASSERTION SUMMARY:"
 echo "  Synchronous Prevention Passed: $PREVENTION_PASSED"
 echo "  Audit Detection Passed:        $DETECTION_PASSED"
 echo "  Inconclusive / Skipped:        $INCONCLUSIVE_COUNT"
@@ -782,10 +813,10 @@ elif [ "$INCONCLUSIVE_COUNT" -gt 0 ]; then
         echo "[FAIL] $INCONCLUSIVE_COUNT INCONCLUSIVE/SKIPPED ASSERTION(S) REJECTED IN STRICT MODE (Exit code: 2)"
         exit 2
     else
-        echo "[INCONCLUSIVE] $TOTAL_PASSED PASSED ($PREVENTION_PASSED prevention, $DETECTION_PASSED detection), $INCONCLUSIVE_COUNT INCONCLUSIVE/SKIPPED (Exit code: 0)"
+        echo "[INCONCLUSIVE] $TOTAL_PASSED ASSERTIONS PASSED ($PREVENTION_PASSED prevention, $DETECTION_PASSED detection), $INCONCLUSIVE_COUNT INCONCLUSIVE/SKIPPED (Exit code: 0)"
         exit 0
     fi
 else
-    echo "[PASS] ALL 5 CONTROLS FORMALLY VERIFIED AND PASSED: $PREVENTION_PASSED prevention, $DETECTION_PASSED detection (Exit code: 0)"
+    echo "[PASS] ALL 5 VERIFICATION ASSERTIONS PASSED: $PREVENTION_PASSED synchronous prevention, $DETECTION_PASSED audit detection (Exit code: 0)"
     exit 0
 fi

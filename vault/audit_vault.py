@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Cryptographically Tamper-Evident Audit Vault (v1.3.2)
+Cryptographically Tamper-Evident Audit Vault (v1.3.3)
 Appends events to a sequential SHA-256 cryptographic hash-chain ledger
-with canonical JSON hashing (versioned, zero delimiter ambiguity, strict key whitelisting),
+with canonical JSON hashing (versioned, zero delimiter ambiguity, strict key whitelisting,
+recursive duplicate key rejection, and bounded epoch timestamps),
 unified reader-writer advisory locking across ledger and external trust anchor,
-fail-closed append-time anchor parity gating, and durable directory fsync.
+fail-closed append-time anchor parity gating with interrupted-commit detection,
+and durable directory fsync.
 
 Each record commits to:
   Hash_n = SHA-256(canonical_json({"version": 1, "index": n, "timestamp": ts, "topic": t, "data": payload, "prev_hash": h_{n-1}}))
@@ -12,7 +14,7 @@ Each record commits to:
 Usage:
   python3 audit_vault.py --verify [--vault-file path/to/audit_chain.jsonl] [--require-records] [--anchor-file path]
   python3 audit_vault.py --append '{"event": "probe", "severity": "WARNING"}' [--topic security.alerts.kernel] [--anchor-file path]
-  python3 audit_vault.py --init-anchor [--vault-file path/to/audit_chain.jsonl] --anchor-file path [--force]
+  python3 audit_vault.py --init-anchor [--vault-file path/to/audit_chain.jsonl] --anchor-file path [--force] [--reason "text"]
 """
 
 import sys
@@ -29,6 +31,17 @@ GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000
 RECORD_VERSION = 1
 RECORD_ALLOWED_KEYS = {"version", "index", "timestamp", "topic", "data", "prev_hash", "hash"}
 ANCHOR_ALLOWED_KEYS = {"version", "index", "timestamp", "head_hash"}
+MAX_REALISTIC_EPOCH = 253402300799.0  # 31-Dec-9999 23:59:59 UTC
+
+
+def rejecting_duplicates_object_pairs_hook(pairs: list[tuple[str, any]]) -> dict:
+    """Strict JSON object pairs hook that raises ValueError on duplicate dictionary keys."""
+    res = {}
+    for key, val in pairs:
+        if key in res:
+            raise ValueError(f"Duplicate JSON key detected: '{key}'")
+        res[key] = val
+    return res
 
 
 def compute_record_hash(index: int, timestamp: float, topic: str, data: dict, prev_hash: str, version: int = RECORD_VERSION) -> str:
@@ -60,8 +73,8 @@ def validate_record_schema(rec: dict, line_num: int, expected_index: int, expect
             raise ValueError(f"Line {line_num}: Missing required field(s): {sorted(list(missing))}")
 
     ver = rec["version"]
-    if ver != RECORD_VERSION:
-        raise ValueError(f"Line {line_num}: Unsupported record version {ver}; expected {RECORD_VERSION}")
+    if not isinstance(ver, int) or isinstance(ver, bool) or ver != RECORD_VERSION:
+        raise ValueError(f"Line {line_num}: Field 'version' must be an integer equal to {RECORD_VERSION}, got {ver!r} ({type(ver).__name__})")
 
     idx = rec["index"]
     if not isinstance(idx, int) or isinstance(idx, bool):
@@ -70,8 +83,15 @@ def validate_record_schema(rec: dict, line_num: int, expected_index: int, expect
         raise ValueError(f"Line {line_num}: Index discontinuity: expected {expected_index}, got {idx}")
 
     ts = rec["timestamp"]
-    if not isinstance(ts, (int, float)) or not math.isfinite(ts):
-        raise ValueError(f"Line {line_num}: Field 'timestamp' must be a finite numeric value, got {ts}")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        raise ValueError(f"Line {line_num}: Field 'timestamp' must be a numeric value, got {type(ts).__name__}")
+    try:
+        if not math.isfinite(ts):
+            raise ValueError(f"Line {line_num}: Field 'timestamp' must be finite, got {ts}")
+    except OverflowError:
+        raise ValueError(f"Line {line_num}: Field 'timestamp' exceeds allowable numeric bounds (overflow)")
+    if ts < 0.0 or ts > MAX_REALISTIC_EPOCH:
+        raise ValueError(f"Line {line_num}: Field 'timestamp' out of realistic epoch range (0 to {MAX_REALISTIC_EPOCH}): {ts}")
 
     topic = rec["topic"]
     if not isinstance(topic, str) or not topic.strip():
@@ -97,7 +117,7 @@ def validate_record_schema(rec: dict, line_num: int, expected_index: int, expect
 
 
 def validate_anchor_schema(anchor_data: dict, anchor_path: str) -> None:
-    """Strictly validates trust anchor dictionary structure and field types."""
+    """Strictly validates trust anchor dictionary structure, types, and bounded values."""
     if not isinstance(anchor_data, dict):
         raise ValueError(f"Anchor {anchor_path}: content is not a valid JSON dictionary")
 
@@ -111,16 +131,23 @@ def validate_anchor_schema(anchor_data: dict, anchor_path: str) -> None:
             raise ValueError(f"Anchor {anchor_path}: Missing required field(s): {sorted(list(missing))}")
 
     ver = anchor_data.get("version")
-    if ver != RECORD_VERSION:
-        raise ValueError(f"Anchor {anchor_path}: Unsupported version {ver}; expected {RECORD_VERSION}")
+    if not isinstance(ver, int) or isinstance(ver, bool) or ver != RECORD_VERSION:
+        raise ValueError(f"Anchor {anchor_path}: Field 'version' must be an integer equal to {RECORD_VERSION}, got {ver!r} ({type(ver).__name__})")
 
     idx = anchor_data.get("index")
     if not isinstance(idx, int) or isinstance(idx, bool):
         raise ValueError(f"Anchor {anchor_path}: 'index' must be a valid integer, got {type(idx).__name__}")
 
     ts = anchor_data.get("timestamp")
-    if not isinstance(ts, (int, float)) or not math.isfinite(ts):
-        raise ValueError(f"Anchor {anchor_path}: 'timestamp' must be a finite numeric value, got {ts}")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        raise ValueError(f"Anchor {anchor_path}: 'timestamp' must be a numeric value, got {type(ts).__name__}")
+    try:
+        if not math.isfinite(ts):
+            raise ValueError(f"Anchor {anchor_path}: 'timestamp' must be finite, got {ts}")
+    except OverflowError:
+        raise ValueError(f"Anchor {anchor_path}: 'timestamp' exceeds allowable numeric bounds (overflow)")
+    if ts < 0.0 or ts > MAX_REALISTIC_EPOCH:
+        raise ValueError(f"Anchor {anchor_path}: 'timestamp' out of realistic epoch range (0 to {MAX_REALISTIC_EPOCH}): {ts}")
 
     head = anchor_data.get("head_hash")
     if not isinstance(head, str) or len(head) != 64 or not all(c in "0123456789abcdefABCDEF" for c in head):
@@ -142,9 +169,9 @@ def _verify_chain_stream_unlocked(vault_path: str) -> tuple[bool, int, str, str]
                 continue
 
             try:
-                rec = json.loads(line)
-            except json.JSONDecodeError as e:
-                return False, record_count, prev_hash, f"Corrupted JSON at line {line_num}: {e}"
+                rec = json.loads(line, object_pairs_hook=rejecting_duplicates_object_pairs_hook)
+            except (json.JSONDecodeError, ValueError) as e:
+                return False, record_count, prev_hash, f"Corrupted or invalid JSON at line {line_num}: {e}"
 
             try:
                 validate_record_schema(rec, line_num, expected_index=record_count, expected_prev_hash=prev_hash)
@@ -159,9 +186,6 @@ def _verify_chain_stream_unlocked(vault_path: str) -> tuple[bool, int, str, str]
 
 def verify_chain_stream(vault_path: str) -> tuple[bool, int, str, str]:
     """Public thread-safe stream verifier with shared advisory locking (LOCK_SH)."""
-    if not os.path.exists(vault_path):
-        return True, 0, GENESIS_HASH, ""
-
     vault_dir = os.path.dirname(os.path.abspath(vault_path))
     lock_path = os.path.join(vault_dir, f".{os.path.basename(vault_path)}.lock")
     os.makedirs(vault_dir, exist_ok=True)
@@ -169,6 +193,8 @@ def verify_chain_stream(vault_path: str) -> tuple[bool, int, str, str]:
     with open(lock_path, "a+") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
         try:
+            if not os.path.exists(vault_path):
+                return True, 0, GENESIS_HASH, ""
             return _verify_chain_stream_unlocked(vault_path)
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -239,7 +265,7 @@ def append_record(vault_path: str, topic: str, data: dict, anchor_path: str | No
 
                 try:
                     with open(anchor_path, "r", encoding="utf-8") as af:
-                        anchor_data = json.load(af)
+                        anchor_data = json.load(af, object_pairs_hook=rejecting_duplicates_object_pairs_hook)
                     validate_anchor_schema(anchor_data, anchor_path)
                 except Exception as e:
                     raise RuntimeError(f"Audit vault append rejected: existing anchor is corrupt or invalid ({e})")
@@ -248,16 +274,21 @@ def append_record(vault_path: str, topic: str, data: dict, anchor_path: str | No
                 anchor_idx = anchor_data["index"]
                 expected_prior_idx = record_count - 1 if record_count > 0 else -1
 
-                if anchor_head != last_hash.lower():
-                    raise RuntimeError(
-                        f"Audit vault append rejected: external anchor divergence! "
-                        f"Ledger head {last_hash} != anchor head {anchor_head}. Refusing to append to diverged history."
-                    )
-                if anchor_idx != expected_prior_idx:
-                    raise RuntimeError(
-                        f"Audit vault append rejected: external anchor index mismatch! "
-                        f"Expected index {expected_prior_idx}, got {anchor_idx}."
-                    )
+                if anchor_head != last_hash.lower() or anchor_idx != expected_prior_idx:
+                    if record_count == anchor_idx + 2:
+                        state_msg = (
+                            f"INTERRUPTED COMMIT DETECTED! "
+                            f"Ledger advanced to index {record_count - 1} while anchor remained at index {anchor_idx}. "
+                            f"Commit was likely interrupted between ledger fsync and anchor update. "
+                            f"Requires operator investigation or authorized anchor resynchronization."
+                        )
+                    else:
+                        state_msg = (
+                            f"EXTERNAL ANCHOR DIVERGENCE! "
+                            f"Ledger head (idx={expected_prior_idx}, hash={last_hash}) != anchor (idx={anchor_idx}, hash={anchor_head}). "
+                            f"Refusing to append to diverged history."
+                        )
+                    raise RuntimeError(f"Audit vault append rejected: {state_msg}")
 
             # 4. Canonical Serialization & Hashing
             new_index = record_count
@@ -283,7 +314,14 @@ def append_record(vault_path: str, topic: str, data: dict, anchor_path: str | No
 
             # 6. Durable External Chain-Head Anchor Update
             if anchor_path:
-                durable_write_anchor(anchor_path, new_index, new_timestamp, new_hash)
+                try:
+                    durable_write_anchor(anchor_path, new_index, new_timestamp, new_hash)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"DURABLE_COMMIT_UNCERTAIN: Record #{new_index} was durably written and fsynced to ledger ({vault_path}), "
+                        f"but external trust anchor update failed ({e}). "
+                        f"Ledger and anchor are now in an interrupted-commit state."
+                    )
 
             return record
 
@@ -296,10 +334,6 @@ def verify_chain(vault_path: str, require_records: bool = False, anchor_path: st
     CLI wrapper for full ledger and anchor verification.
     Holds a unified shared advisory lock (LOCK_SH) across BOTH ledger and anchor verification.
     """
-    if not os.path.exists(vault_path):
-        print(f"Error: Vault file not found at {vault_path}")
-        return False
-
     vault_dir = os.path.dirname(os.path.abspath(vault_path))
     lock_path = os.path.join(vault_dir, f".{os.path.basename(vault_path)}.lock")
     os.makedirs(vault_dir, exist_ok=True)
@@ -307,6 +341,10 @@ def verify_chain(vault_path: str, require_records: bool = False, anchor_path: st
     with open(lock_path, "a+") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
         try:
+            if not os.path.exists(vault_path):
+                print(f"Error: Vault file not found at {vault_path}")
+                return False
+
             is_valid, count, head_hash, err = _verify_chain_stream_unlocked(vault_path)
             if not is_valid:
                 print(f"[FAIL] Cryptographic chain verification failed: {err}")
@@ -318,7 +356,7 @@ def verify_chain(vault_path: str, require_records: bool = False, anchor_path: st
                     return False
                 try:
                     with open(anchor_path, "r", encoding="utf-8") as af:
-                        anchor_data = json.load(af)
+                        anchor_data = json.load(af, object_pairs_hook=rejecting_duplicates_object_pairs_hook)
                     validate_anchor_schema(anchor_data, anchor_path)
                 except Exception as e:
                     print(f"[FAIL] Failed to read or validate external trust anchor: {e}")
@@ -352,15 +390,11 @@ def verify_chain(vault_path: str, require_records: bool = False, anchor_path: st
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def init_anchor(vault_path: str, anchor_path: str, force: bool = False) -> bool:
+def init_anchor(vault_path: str, anchor_path: str, force: bool = False, reason: str | None = None) -> bool:
     """
     Explicitly bootstraps or resets the external trust anchor from a verified existing ledger.
     Holds exclusive lock (LOCK_EX) throughout verification and anchor writing.
     """
-    if not os.path.exists(vault_path):
-        print(f"Error: Ledger file not found at {vault_path}")
-        return False
-
     vault_dir = os.path.dirname(os.path.abspath(vault_path))
     lock_path = os.path.join(vault_dir, f".{os.path.basename(vault_path)}.lock")
     os.makedirs(vault_dir, exist_ok=True)
@@ -368,9 +402,19 @@ def init_anchor(vault_path: str, anchor_path: str, force: bool = False) -> bool:
     with open(lock_path, "a+") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            if os.path.exists(anchor_path) and not force:
-                print(f"[FAIL] Anchor file already exists at {anchor_path}. Overwrite refused without --force.")
+            if not os.path.exists(vault_path):
+                print(f"Error: Ledger file not found at {vault_path}")
                 return False
+
+            if os.path.exists(anchor_path):
+                if not force:
+                    print(f"[FAIL] Anchor file already exists at {anchor_path}. Overwrite refused without --force.")
+                    return False
+                print(f"[WARN] ⚠️ TRUST ROOT RESET: Overwriting existing trust anchor at {anchor_path} (--force used).")
+                if reason:
+                    print(f"       Operator Reason: {reason}")
+                else:
+                    print(f"       Notice: No --reason supplied for trust root overwrite.")
 
             is_valid, count, head_hash, err = _verify_chain_stream_unlocked(vault_path)
             if not is_valid:
@@ -391,13 +435,14 @@ def init_anchor(vault_path: str, anchor_path: str, force: bool = False) -> bool:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Cryptographically Tamper-Evident Audit Vault (v1.3.2)")
+    parser = argparse.ArgumentParser(description="Cryptographically Tamper-Evident Audit Vault (v1.3.3)")
     parser.add_argument("--vault-file", default=DEFAULT_VAULT_FILE, help="Path to audit_chain.jsonl")
     parser.add_argument("--verify", action="store_true", help="Verify chain integrity")
     parser.add_argument("--require-records", action="store_true", help="Reject empty ledgers during verification")
     parser.add_argument("--anchor-file", help="Path to external trust anchor checkpoint")
     parser.add_argument("--init-anchor", action="store_true", help="Explicitly bootstrap trust anchor from verified ledger")
     parser.add_argument("--force", action="store_true", help="Force overwrite existing anchor during --init-anchor")
+    parser.add_argument("--reason", help="Documented reason for anchor reset when using --force")
     parser.add_argument("--append", help="JSON data payload to append")
     parser.add_argument("--topic", default="security.alerts.kernel", help="Event topic")
 
@@ -407,14 +452,14 @@ def main():
         if not args.anchor_file:
             print("Error: --init-anchor requires --anchor-file path")
             sys.exit(1)
-        success = init_anchor(args.vault_file, args.anchor_file, force=args.force)
+        success = init_anchor(args.vault_file, args.anchor_file, force=args.force, reason=args.reason)
         sys.exit(0 if success else 1)
     elif args.verify:
         success = verify_chain(args.vault_file, require_records=args.require_records, anchor_path=args.anchor_file)
         sys.exit(0 if success else 1)
     elif args.append:
         try:
-            data = json.loads(args.append)
+            data = json.loads(args.append, object_pairs_hook=rejecting_duplicates_object_pairs_hook)
             if not isinstance(data, dict):
                 raise ValueError("JSON payload must be a dictionary object")
         except Exception as e:
