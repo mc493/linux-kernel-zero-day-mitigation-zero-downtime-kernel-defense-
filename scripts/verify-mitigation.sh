@@ -11,6 +11,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 FAILURES=0
 STRICT_MODE="${STRICT_MODE:-0}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-python:3.11-alpine@sha256:09d17d5e4c16d0a7a1eea690bcb7c6ab8616b211f8421e429e97c1bef5bd0ed2}"
 
 for arg in "$@"; do
     case "$arg" in
@@ -19,7 +20,7 @@ for arg in "$@"; do
             ;;
         -h|--help)
             echo "Usage: $0 [--strict]"
-            echo "  --strict  Enforces zero-tolerance CI gating (fails on any INCONCLUSIVE or SKIPPED test)"
+            echo "  --strict  Enforces zero-tolerance CI gating (fails on any missing prerequisite, inconclusive state, or skipped test)"
             exit 0
             ;;
     esac
@@ -32,7 +33,7 @@ fi
 AUDIT_LOG="${AUDIT_LOG:-$DEFAULT_AUDIT_LOG}"
 
 echo "========================================================================"
-echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE"
+echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE (v1.2.9)"
 if [ "$STRICT_MODE" -eq 1 ]; then
     echo "Mode: STRICT (Zero-tolerance CI gating active)"
 else
@@ -40,12 +41,24 @@ else
 fi
 echo "========================================================================"
 
-# Test 1: ebtables module blockade & RAM residency check
+# Strict Mode Upfront Prerequisite Check: Mandatory Audit Ledger
+if [ "$STRICT_MODE" -eq 1 ]; then
+    if [ ! -f "$AUDIT_LOG" ]; then
+        echo "[PREFLIGHT] [FAIL] Strict mode requires active AUDIT_LOG ledger: $AUDIT_LOG"
+        FAILURES=$((FAILURES + 1))
+    else
+        echo "[PREFLIGHT] [PASS] Verified active cryptographic audit ledger: $AUDIT_LOG"
+    fi
+fi
+
+# Test 1: ebtables module loader blockade & RAM residency check
 echo -n "[Test 1/5] ebtables module loader blockade & RAM state: "
 LOADER_BLOCKED=0
 DRYRUN_OUTPUT=$(modprobe -n -v ebt_snat 2>&1 || true)
-if echo "$DRYRUN_OUTPUT" | grep -q "/bin/true"; then
+if echo "$DRYRUN_OUTPUT" | grep -E -q "^install (/bin/true|/bin/false|:)"; then
     LOADER_BLOCKED=1
+elif echo "$DRYRUN_OUTPUT" | grep -q -i "not found"; then
+    LOADER_BLOCKED=2
 fi
 
 if lsmod | grep -q -E "^ebt"; then
@@ -54,13 +67,15 @@ if lsmod | grep -q -E "^ebt"; then
     lsmod | grep -E "^ebt"
     FAILURES=$((FAILURES + 1))
 elif [ "$LOADER_BLOCKED" -eq 1 ]; then
-    echo "[PASS] PASSED (Loader override active: 'install /bin/true', 0 modules resident in RAM)"
+    echo "[PASS] PASSED (Loader override active: 'install /bin/true', 0 ebtables modules in RAM)"
+elif [ "$LOADER_BLOCKED" -eq 2 ]; then
+    echo "[INFO] NOT_APPLICABLE (ebt_snat module not found in kernel tree: 0 modules in RAM)"
 else
     if [ "$STRICT_MODE" -eq 1 ]; then
-        echo "[FAIL] FAILED (Strict mode: Loader override 'install /bin/true' missing, dry-run returned: $DRYRUN_OUTPUT)"
+        echo "[FAIL] FAILED (Strict mode: Loader override missing, modprobe output: $DRYRUN_OUTPUT)"
         FAILURES=$((FAILURES + 1))
     else
-        echo "[WARN] INCONCLUSIVE (0 modules resident in RAM, but modprobe dry-run returned: $DRYRUN_OUTPUT)"
+        echo "[WARN] INCONCLUSIVE (0 modules resident in RAM, but modprobe output: $DRYRUN_OUTPUT)"
     fi
 fi
 
@@ -71,12 +86,12 @@ PRE_TS_2=$(python3 -c "import time; print(time.time())")
 TEST2_OUTPUT=$(python3 -c "
 import socket, errno, sys
 
-seccomp_mode = 0
+seccomp_mode = 'unknown'
 try:
     with open('/proc/self/status') as f:
         for line in f:
             if line.startswith('Seccomp:'):
-                seccomp_mode = int(line.split()[1])
+                seccomp_mode = line.split()[1].strip()
 except Exception:
     pass
 
@@ -86,10 +101,14 @@ try:
     s.close()
 except OSError as e:
     if e.errno == errno.EPERM:
-        if seccomp_mode == 2:
-            print('BLOCKED_BY_SECCOMP')
+        if seccomp_mode == '2':
+            print('BLOCKED_BY_SECCOMP_FILTER')
+        elif seccomp_mode == '1':
+            print('BLOCKED_BY_SECCOMP_STRICT')
+        elif seccomp_mode == '0':
+            print('BLOCKED_BY_HOST_POLICY')
         else:
-            print(f'BLOCKED_BY_POLICY|seccomp={seccomp_mode}')
+            print('BLOCKED_EPERM_SECCOMP_UNKNOWN')
     elif e.errno == errno.EAFNOSUPPORT:
         print('UNSUPPORTED_BY_RUNTIME')
     else:
@@ -100,10 +119,12 @@ except Exception as e:
 
 TEST2_STATUS=$(echo "$TEST2_OUTPUT" | cut -d'|' -f1)
 
-if [ "$TEST2_STATUS" = "BLOCKED_BY_SECCOMP" ]; then
+if [ "$TEST2_STATUS" = "BLOCKED_BY_SECCOMP_FILTER" ]; then
     echo "[PASS] PASSED (Synchronously blocked by SECCOMP filter: exact EPERM, Seccomp mode=2 verified)"
-elif [ "$TEST2_STATUS" = "BLOCKED_BY_POLICY" ]; then
-    echo "[PASS] PASSED (Blocked by host policy/LSM: exact EPERM, Seccomp mode=0 verified)"
+elif [ "$TEST2_STATUS" = "BLOCKED_BY_HOST_POLICY" ]; then
+    echo "[PASS] PASSED (Blocked by host LSM/capability policy: exact EPERM, Seccomp mode=0 verified)"
+elif [ "$TEST2_STATUS" = "BLOCKED_EPERM_SECCOMP_UNKNOWN" ]; then
+    echo "[PASS] PASSED (Blocked with exact EPERM, Seccomp status unreadable)"
 elif [ "$TEST2_STATUS" = "UNSUPPORTED_BY_RUNTIME" ]; then
     echo "[INFO] NOT_APPLICABLE (Address family AF_ALG not supported by current runtime: EAFNOSUPPORT)"
 elif [ "$TEST2_STATUS" = "PROBE_TRIGGERED" ]; then
@@ -123,8 +144,13 @@ try:
             if not line: continue
             try:
                 rec = json.loads(line)
-                if float(rec.get('timestamp', 0)) >= pre_ts and pattern in json.dumps(rec):
-                    found = True; break
+                if float(rec.get('timestamp', 0)) >= pre_ts:
+                    data = rec.get('data', {})
+                    topic = rec.get('topic', '')
+                    rule = data.get('rule', '') if isinstance(data, dict) else ''
+                    event = data.get('event', '') if isinstance(data, dict) else ''
+                    if pattern in topic or pattern in rule or pattern in event or (isinstance(data, dict) and pattern in json.dumps(data)):
+                        found = True; break
             except Exception: pass
 except Exception: pass
 sys.exit(0 if found else 1)
@@ -165,12 +191,12 @@ PRE_TS_3=$(python3 -c "import time; print(time.time())")
 TEST3_OUTPUT=$(python3 -c "
 import socket, threading, struct, errno, sys
 
-seccomp_mode = 0
+seccomp_mode = 'unknown'
 try:
     with open('/proc/self/status') as f:
         for line in f:
             if line.startswith('Seccomp:'):
-                seccomp_mode = int(line.split()[1])
+                seccomp_mode = line.split()[1].strip()
 except Exception:
     pass
 
@@ -242,8 +268,10 @@ SECCOMP_M3=$(echo "$TEST3_OUTPUT" | cut -d'|' -f3)
 if [ "$P1_RES" = "BLOCKED_EPERM" ] && [ "$P2_RES" = "BLOCKED_EPERM" ]; then
     if [ "$SECCOMP_M3" = "seccomp=2" ]; then
         echo "[PASS] PASSED (Synchronously blocked by SECCOMP filter: Phase 1 & 2 exact EPERM, Seccomp mode=2 verified)"
-    else
+    elif [ "$SECCOMP_M3" = "seccomp=0" ]; then
         echo "[PASS] PASSED (Blocked by host policy/LSM: Phase 1 & 2 exact EPERM, Seccomp mode=0 verified)"
+    else
+        echo "[PASS] PASSED (Blocked by policy: Phase 1 & 2 exact EPERM, Seccomp status: $SECCOMP_M3)"
     fi
 elif [ "$P1_RES" = "UNSUPPORTED_BY_RUNTIME" ]; then
     echo "[INFO] NOT_APPLICABLE (kTLS subsystem not supported by current runtime: P1=$P1_RES)"
@@ -264,9 +292,13 @@ try:
             if not line: continue
             try:
                 rec = json.loads(line)
-                rec_str = json.dumps(rec)
-                if float(rec.get('timestamp', 0)) >= pre_ts and ('kTLS' in rec_str or 'TCP_ULP' in rec_str):
-                    found = True; break
+                if float(rec.get('timestamp', 0)) >= pre_ts:
+                    data = rec.get('data', {})
+                    topic = rec.get('topic', '')
+                    rule = data.get('rule', '') if isinstance(data, dict) else ''
+                    event = data.get('event', '') if isinstance(data, dict) else ''
+                    if 'kTLS' in topic or 'kTLS' in rule or 'kTLS' in event or 'TCP_ULP' in json.dumps(rec):
+                        found = True; break
             except Exception: pass
 except Exception: pass
 sys.exit(0 if found else 1)
@@ -298,19 +330,26 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
-# Test 4: OCI Container Synchronous SECCOMP Profile Enforcement (if Docker available)
+# Test 4: OCI Container Synchronous SECCOMP Profile Enforcement
 SECCOMP_PROFILE="${REPO_ROOT}/seccomp/seccomp-kernel-cve-mitigation.json"
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && [ -f "$SECCOMP_PROFILE" ]; then
-    echo -n "[Test 4/5] OCI Container Synchronous SECCOMP Profile Enforcement: "
-    SECCOMP_OUTPUT=$(docker run --rm --security-opt seccomp="$SECCOMP_PROFILE" python:3.11-alpine python3 -c "
+echo -n "[Test 4/5] OCI Container Synchronous SECCOMP Profile Enforcement: "
+
+DOCKER_AVAILABLE=0
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    DOCKER_AVAILABLE=1
+fi
+
+if [ "$DOCKER_AVAILABLE" -eq 1 ] && [ -f "$SECCOMP_PROFILE" ]; then
+    CONTAINER_ERR_LOG=$(mktemp)
+    SECCOMP_OUTPUT=$(docker run --rm --security-opt seccomp="$SECCOMP_PROFILE" "$CONTAINER_IMAGE" python3 -c "
 import socket, threading, errno, sys
 
-seccomp_mode = 0
+seccomp_mode = 'unknown'
 try:
     with open('/proc/self/status') as f:
         for line in f:
             if line.startswith('Seccomp:'):
-                seccomp_mode = int(line.split()[1])
+                seccomp_mode = line.split()[1].strip()
 except Exception:
     pass
 
@@ -323,7 +362,7 @@ try:
     s.close()
 except OSError as e:
     if e.errno == errno.EPERM:
-        results['AF_ALG'] = 'BLOCKED_BY_SECCOMP' if seccomp_mode == 2 else 'BLOCKED_BY_OTHER'
+        results['AF_ALG'] = f'BLOCKED_EPERM_SECCOMP_{seccomp_mode}'
     else:
         results['AF_ALG'] = f'FAIL_{errno.errorcode.get(e.errno, e.errno)}'
 
@@ -349,70 +388,82 @@ cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 cli.connect(('127.0.0.1', port))
 t.join(timeout=2.0)
 
-# Test 4.2: Phase 1 TCP_ULP exact EPERM assertion
-try:
-    cli.setsockopt(6, 31, b'tls\0')
-    results['TCP_ULP'] = 'UNBLOCKED'
-except OSError as e:
-    if e.errno == errno.EPERM:
-        results['TCP_ULP'] = 'BLOCKED_BY_SECCOMP' if seccomp_mode == 2 else 'BLOCKED_BY_OTHER'
-    else:
-        results['TCP_ULP'] = f'FAIL_{errno.errorcode.get(e.errno, e.errno)}'
+if active_conn is None or active_conn.fileno() == -1:
+    results['ACCEPT'] = 'SERVER_ACCEPT_FAILED'
+elif cli.fileno() == -1:
+    results['CLIENT'] = 'CLIENT_SOCKET_INVALID'
+else:
+    # Test 4.2: Phase 1 TCP_ULP exact EPERM assertion
+    try:
+        cli.setsockopt(6, 31, b'tls\0')
+        results['TCP_ULP'] = 'UNBLOCKED'
+    except OSError as e:
+        if e.errno == errno.EPERM:
+            results['TCP_ULP'] = f'BLOCKED_EPERM_SECCOMP_{seccomp_mode}'
+        else:
+            results['TCP_ULP'] = f'FAIL_{errno.errorcode.get(e.errno, e.errno)}'
 
-# Test 4.3: Phase 2 SOL_TLS exact EPERM assertion
-try:
-    cli.setsockopt(282, 1, b'\x00'*40)
-    results['SOL_TLS'] = 'UNBLOCKED'
-except OSError as e:
-    if e.errno == errno.EPERM:
-        results['SOL_TLS'] = 'BLOCKED_BY_SECCOMP' if seccomp_mode == 2 else 'BLOCKED_BY_OTHER'
-    else:
-        results['SOL_TLS'] = f'FAIL_{errno.errorcode.get(e.errno, e.errno)}'
+    # Test 4.3: Phase 2 SOL_TLS exact EPERM assertion
+    try:
+        cli.setsockopt(282, 1, b'\x00'*40)
+        results['SOL_TLS'] = 'UNBLOCKED'
+    except OSError as e:
+        if e.errno == errno.EPERM:
+            results['SOL_TLS'] = f'BLOCKED_EPERM_SECCOMP_{seccomp_mode}'
+        else:
+            results['SOL_TLS'] = f'FAIL_{errno.errorcode.get(e.errno, e.errno)}'
 
 cli.close()
 if active_conn:
     active_conn.close()
 srv.close()
 
-if all(v == 'BLOCKED_BY_SECCOMP' for v in results.values()):
-    print('ALL_BLOCKED_BY_SECCOMP')
+expected = 'BLOCKED_EPERM_SECCOMP_2'
+if all(results.get(k) == expected for k in ['AF_ALG', 'TCP_ULP', 'SOL_TLS']):
+    print('ALL_BLOCKED_BY_SECCOMP_FILTER')
 else:
-    print(f'LEAK:{results}|seccomp={seccomp_mode}')
-" 2>/dev/null || echo "DOCKER_RUN_FAILED")
+    print(f'LEAK:{results}')
+" 2>"$CONTAINER_ERR_LOG" || echo "DOCKER_EXEC_ERROR")
 
-    if [ "$SECCOMP_OUTPUT" = "ALL_BLOCKED_BY_SECCOMP" ]; then
+    if [ "$SECCOMP_OUTPUT" = "ALL_BLOCKED_BY_SECCOMP_FILTER" ]; then
         echo "[PASS] PASSED (AF_ALG, TCP_ULP, SOL_TLS synchronously rejected by SECCOMP: exact EPERM, Seccomp mode=2 verified)"
-    elif [ "$SECCOMP_OUTPUT" = "DOCKER_RUN_FAILED" ]; then
+    elif [ "$SECCOMP_OUTPUT" = "DOCKER_EXEC_ERROR" ]; then
+        ERR_SNIPPET=$(head -n 1 "$CONTAINER_ERR_LOG")
         if [ "$STRICT_MODE" -eq 1 ]; then
-            echo "[FAIL] FAILED (Strict mode: Container runtime execution failed or image unavailable)"
+            echo "[FAIL] FAILED (Strict mode: Container execution failed: ${ERR_SNIPPET:-unknown error})"
             FAILURES=$((FAILURES + 1))
         else
-            echo "[INFO] SKIPPED (Container image not cached or pull disabled)"
+            echo "[WARN] INCONCLUSIVE (Container execution failed: ${ERR_SNIPPET:-check docker logs})"
         fi
     else
         echo "[FAIL] FAILED (Seccomp policy leak: $SECCOMP_OUTPUT)"
         FAILURES=$((FAILURES + 1))
     fi
+    rm -f "$CONTAINER_ERR_LOG"
 else
     if [ "$STRICT_MODE" -eq 1 ]; then
-        echo "[Test 4/5] OCI Container Synchronous SECCOMP Profile Enforcement: [FAIL] FAILED (Strict mode: Docker runtime or profile missing)"
+        echo "[FAIL] FAILED (Strict mode: Docker runtime or seccomp profile missing)"
         FAILURES=$((FAILURES + 1))
+    else
+        echo "[INFO] SKIPPED (Docker runtime or seccomp profile not available)"
     fi
 fi
 
 # Test 5: Independent Phase 2 Interception Proof (Phase 1 allowed, Phase 2 independently blocked with EPERM)
 SECCOMP_P2_PROFILE="${REPO_ROOT}/seccomp/seccomp-test-phase2-isolation.json"
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && [ -f "$SECCOMP_P2_PROFILE" ]; then
-    echo -n "[Test 5/5] Independent Phase 2 kTLS Interception Proof: "
-    P2_ISO_OUTPUT=$(docker run --rm --security-opt seccomp="$SECCOMP_P2_PROFILE" python:3.11-alpine python3 -c "
+echo -n "[Test 5/5] Independent Phase 2 kTLS Interception Proof: "
+
+if [ "$DOCKER_AVAILABLE" -eq 1 ] && [ -f "$SECCOMP_P2_PROFILE" ]; then
+    CONTAINER_ERR_LOG_5=$(mktemp)
+    P2_ISO_OUTPUT=$(docker run --rm --security-opt seccomp="$SECCOMP_P2_PROFILE" "$CONTAINER_IMAGE" python3 -c "
 import socket, threading, struct, errno
 
-seccomp_mode = 0
+seccomp_mode = 'unknown'
 try:
     with open('/proc/self/status') as f:
         for line in f:
             if line.startswith('Seccomp:'):
-                seccomp_mode = int(line.split()[1])
+                seccomp_mode = line.split()[1].strip()
 except Exception:
     pass
 
@@ -437,12 +488,15 @@ cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 cli.connect(('127.0.0.1', port))
 t.join(timeout=2.0)
 
-# 1. Phase 1 must succeed under isolation profile
+# 1. Server accept & socket duplex verification
 p1_ok = False
 p1_err = None
-if active_conn is None:
+if active_conn is None or active_conn.fileno() == -1:
     p1_err = 'SERVER_ACCEPT_FAILED'
+elif cli.fileno() == -1:
+    p1_err = 'CLIENT_SOCKET_INVALID'
 else:
+    # Phase 1 must succeed under isolation profile
     try:
         cli.setsockopt(6, 31, b'tls\0')
         p1_ok = True
@@ -458,7 +512,7 @@ try:
 except OSError as e:
     if e.errno == errno.EPERM:
         p2_blocked = True
-        p2_err = 'BLOCKED_EPERM'
+        p2_err = f'BLOCKED_EPERM_SECCOMP_{seccomp_mode}'
     else:
         p2_err = f'{e.errno}_{errno.errorcode.get(e.errno, e.errno)}'
 
@@ -467,29 +521,33 @@ if active_conn:
     active_conn.close()
 srv.close()
 
-if p1_ok and p2_blocked and seccomp_mode == 2:
+if p1_ok and p2_blocked and seccomp_mode == '2':
     print('PHASE2_INDEPENDENTLY_PROVEN_BY_SECCOMP')
 else:
     print(f'FAILED: p1_ok={p1_ok} (err={p1_err}), p2_blocked={p2_blocked} (res={p2_err}), seccomp={seccomp_mode}')
-" 2>/dev/null || echo "DOCKER_RUN_FAILED")
+" 2>"$CONTAINER_ERR_LOG_5" || echo "DOCKER_EXEC_ERROR")
 
     if [ "$P2_ISO_OUTPUT" = "PHASE2_INDEPENDENTLY_PROVEN_BY_SECCOMP" ]; then
         echo "[PASS] PASSED (Phase 1 attached successfully, Phase 2 independently blocked by SECCOMP: exact EPERM, Seccomp mode=2 verified)"
-    elif [ "$P2_ISO_OUTPUT" = "DOCKER_RUN_FAILED" ]; then
+    elif [ "$P2_ISO_OUTPUT" = "DOCKER_EXEC_ERROR" ]; then
+        ERR_SNIPPET=$(head -n 1 "$CONTAINER_ERR_LOG_5")
         if [ "$STRICT_MODE" -eq 1 ]; then
-            echo "[FAIL] FAILED (Strict mode: Container differential isolation execution failed)"
+            echo "[FAIL] FAILED (Strict mode: Differential isolation container execution failed: ${ERR_SNIPPET:-unknown error})"
             FAILURES=$((FAILURES + 1))
         else
-            echo "[INFO] SKIPPED (Container image not cached or pull disabled)"
+            echo "[WARN] INCONCLUSIVE (Differential isolation container failed: ${ERR_SNIPPET:-check docker logs})"
         fi
     else
         echo "[FAIL] FAILED (Phase 2 isolation proof failed: $P2_ISO_OUTPUT)"
         FAILURES=$((FAILURES + 1))
     fi
+    rm -f "$CONTAINER_ERR_LOG_5"
 else
     if [ "$STRICT_MODE" -eq 1 ]; then
-        echo "[Test 5/5] Independent Phase 2 kTLS Interception Proof: [FAIL] FAILED (Strict mode: Docker runtime or isolation profile missing)"
+        echo "[FAIL] FAILED (Strict mode: Docker runtime or isolation profile missing)"
         FAILURES=$((FAILURES + 1))
+    else
+        echo "[INFO] SKIPPED (Docker runtime or isolation profile not available)"
     fi
 fi
 
