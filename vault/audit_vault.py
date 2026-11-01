@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cryptographically Tamper-Evident Audit Vault (v1.3.6)
+Cryptographically Tamper-Evident Audit Vault (v1.3.7)
 Appends events to a sequential SHA-256 cryptographic hash-chain ledger
 with canonical JSON hashing (versioned, zero delimiter ambiguity, strict key whitelisting,
 recursive duplicate key rejection, bounded-depth recursive string-key dictionary validation,
@@ -8,16 +8,18 @@ and bounded epoch timestamps),
 unified reader-writer advisory locking adhering to a strict global hierarchy (Level 1 Vault -> Level 2 Admin Log),
 fail-closed append-time anchor parity gating with rigorous interrupted-commit verification,
 mandatory documented justifications for forced trust-root resets,
-TOCTOU-immune open file descriptor path collision defense with symbolic link rejection,
+TOCTOU-immune dir_fd-relative open with O_NOFOLLOW symlink rejection, regular file mode validation,
+process UID ownership enforcement, and open descriptor inode collision defense,
 granular two-phase administrative write-ahead logging (PREPARED -> COMMITTED),
-and automatic crash-recovery reconciliation into a tamper-evident administrative hash-chain.
+external administrative trust anchor checkpoints with truncation and divergence detection,
+and automatic crash-recovery reconciliation with trailing partial write cleanup at EOF.
 
 Each record commits to:
   Hash_n = SHA-256(canonical_json({"version": 1, "index": n, "timestamp": ts, "topic": t, "data": payload, "prev_hash": h_{n-1}}))
 
 Usage:
   python3 audit_vault.py --verify [--vault-file path/to/audit_chain.jsonl] [--require-records] [--anchor-file path]
-  python3 audit_vault.py --verify-admin [--admin-log path]
+  python3 audit_vault.py --verify-admin [--admin-log path] [--admin-anchor-file path]
   python3 audit_vault.py --recover-admin [--vault-file path] [--anchor-file path] [--admin-log path]
   python3 audit_vault.py --append '{"event": "probe", "severity": "WARNING"}' [--topic security.alerts.kernel] [--anchor-file path]
   python3 audit_vault.py --init-anchor [--vault-file path/to/audit_chain.jsonl] --anchor-file path [--force --reason "text"] [--admin-log path]
@@ -31,13 +33,17 @@ import math
 import hashlib
 import argparse
 import fcntl
+import stat
+import errno
 
 DEFAULT_VAULT_FILE = os.getenv("AUDIT_VAULT_FILE", "./audit_chain.jsonl")
 GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000"
 RECORD_VERSION = 1
 ADMIN_RECORD_VERSION = 1
+ADMIN_ANCHOR_RECORD_VERSION = 1
 RECORD_ALLOWED_KEYS = {"version", "index", "timestamp", "topic", "data", "prev_hash", "hash"}
 ANCHOR_ALLOWED_KEYS = {"version", "index", "timestamp", "head_hash"}
+ADMIN_ANCHOR_ALLOWED_KEYS = {"admin_index", "head_hash", "timestamp", "version"}
 ADMIN_ALLOWED_KEYS = {
     "action",
     "admin_hash",
@@ -403,65 +409,124 @@ def append_record(vault_path: str, topic: str, data: dict, anchor_path: str | No
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def verify_chain(vault_path: str, require_records: bool = False, anchor_path: str | None = None) -> bool:
+def validate_admin_anchor_schema(anchor_data: dict, anchor_path: str) -> None:
+    """Strictly validates administrative trust anchor dictionary structure, types, and bounded values."""
+    if not isinstance(anchor_data, dict):
+        raise ValueError(f"Admin Anchor {anchor_path}: content is not a valid JSON dictionary")
+
+    keys = set(anchor_data.keys())
+    if keys != ADMIN_ANCHOR_ALLOWED_KEYS:
+        extra = keys - ADMIN_ANCHOR_ALLOWED_KEYS
+        missing = ADMIN_ANCHOR_ALLOWED_KEYS - keys
+        if extra:
+            raise ValueError(f"Admin Anchor {anchor_path}: Unauthenticated extra field(s): {sorted(list(extra))}")
+        if missing:
+            raise ValueError(f"Admin Anchor {anchor_path}: Missing required field(s): {sorted(list(missing))}")
+
+    ver = anchor_data.get("version")
+    if not isinstance(ver, int) or isinstance(ver, bool) or ver != ADMIN_ANCHOR_RECORD_VERSION:
+        raise ValueError(f"Admin Anchor {anchor_path}: Field 'version' must be an integer equal to {ADMIN_ANCHOR_RECORD_VERSION}, got {ver!r} ({type(ver).__name__})")
+
+    idx = anchor_data.get("admin_index")
+    if not isinstance(idx, int) or isinstance(idx, bool):
+        raise ValueError(f"Admin Anchor {anchor_path}: 'admin_index' must be a valid integer, got {type(idx).__name__}")
+    if idx < -1:
+        raise ValueError(f"Admin Anchor {anchor_path}: 'admin_index' cannot be less than -1, got {idx}")
+
+    ts = anchor_data.get("timestamp")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        raise ValueError(f"Admin Anchor {anchor_path}: 'timestamp' must be a numeric value, got {type(ts).__name__}")
+    try:
+        if not math.isfinite(ts):
+            raise ValueError(f"Admin Anchor {anchor_path}: 'timestamp' must be finite, got {ts}")
+    except OverflowError:
+        raise ValueError(f"Admin Anchor {anchor_path}: 'timestamp' exceeds allowable numeric bounds")
+    if ts < 0.0 or ts > MAX_REALISTIC_EPOCH:
+        raise ValueError(f"Admin Anchor {anchor_path}: 'timestamp' out of realistic epoch range (0 to {MAX_REALISTIC_EPOCH}): {ts}")
+
+    head = anchor_data.get("head_hash")
+    if not isinstance(head, str) or len(head) != 64 or not all(c in "0123456789abcdefABCDEF" for c in head):
+        raise ValueError(f"Admin Anchor {anchor_path}: 'head_hash' must be a 64-character hexadecimal SHA-256 digest")
+    if idx == -1 and head.lower() != GENESIS_HASH:
+        raise ValueError(f"Admin Anchor {anchor_path}: Uninitialized admin anchor (index -1) must have genesis head hash ({GENESIS_HASH}), got {head}")
+
+
+def durable_write_admin_anchor(admin_anchor_path: str, admin_index: int, timestamp: float, head_hash: str) -> None:
+    """Writes administrative anchor checkpoint atomically with file and parent-directory fsync."""
+    anchor_dir = os.path.dirname(os.path.abspath(admin_anchor_path))
+    os.makedirs(anchor_dir, exist_ok=True)
+    anchor_tmp = f"{admin_anchor_path}.tmp.{os.getpid()}_{time.time_ns()}"
+
+    anchor_content = {
+        "admin_index": admin_index,
+        "head_hash": head_hash.lower(),
+        "timestamp": timestamp,
+        "version": ADMIN_ANCHOR_RECORD_VERSION,
+    }
+
+    with open(anchor_tmp, "w", encoding="utf-8") as af:
+        af.write(json.dumps(anchor_content, sort_keys=True, allow_nan=False, separators=(',', ':')) + "\n")
+        af.flush()
+        os.fsync(af.fileno())
+
+    os.replace(anchor_tmp, admin_anchor_path)
+
+    dir_fd = os.open(anchor_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _sanitize_admin_log_eof(admin_log: str) -> bool:
     """
-    CLI wrapper for full ledger and anchor verification.
-    Holds a unified shared advisory lock (LOCK_SH) across BOTH ledger and anchor verification.
+    Cleans incomplete trailing writes at EOF caused by sudden power-loss or crashes during os.write.
+    Trims un-newline-terminated partial bytes or trailing unparseable partial JSON lines at EOF,
+    preserving prior valid records.
+    Returns True if truncation was performed, False otherwise.
     """
-    vault_dir = os.path.dirname(os.path.abspath(vault_path))
-    lock_path = os.path.join(vault_dir, f".{os.path.basename(vault_path)}.lock")
-    os.makedirs(vault_dir, exist_ok=True)
+    if not os.path.exists(admin_log) or os.path.getsize(admin_log) == 0:
+        return False
 
-    with open(lock_path, "a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
-        try:
-            if not os.path.exists(vault_path):
-                print(f"Error: Vault file not found at {vault_path}")
-                return False
+    with open(admin_log, "rb+") as f:
+        data = f.read()
+        if not data:
+            return False
 
-            is_valid, count, head_hash, _penult, err = _verify_chain_stream_unlocked(vault_path)
-            if not is_valid:
-                print(f"[FAIL] Cryptographic chain verification failed: {err}")
-                return False
+        modified = False
+        # 1. If file does not end with newline, strip trailing non-newline bytes
+        if not data.endswith(b"\n"):
+            last_nl = data.rfind(b"\n")
+            if last_nl == -1:
+                f.seek(0)
+                f.truncate(0)
+                f.flush()
+                os.fsync(f.fileno())
+                return True
+            else:
+                data = data[:last_nl + 1]
+                f.seek(last_nl + 1)
+                f.truncate()
+                f.flush()
+                os.fsync(f.fileno())
+                modified = True
 
-            if anchor_path:
-                if not os.path.exists(anchor_path):
-                    print(f"[FAIL] Configured external trust anchor not found at {anchor_path}")
-                    return False
+        # 2. Check if the last line parses as valid JSON
+        lines = data.splitlines(keepends=True)
+        if lines:
+            last_line = lines[-1].strip()
+            if last_line:
                 try:
-                    with open(anchor_path, "r", encoding="utf-8") as af:
-                        anchor_data = json.load(af, object_pairs_hook=rejecting_duplicates_object_pairs_hook)
-                    validate_anchor_schema(anchor_data, anchor_path)
-                except Exception as e:
-                    print(f"[FAIL] Failed to read or validate external trust anchor: {e}")
-                    return False
+                    json.loads(last_line.decode("utf-8"))
+                except Exception:
+                    keep_len = sum(len(l) for l in lines[:-1])
+                    f.seek(keep_len)
+                    f.truncate()
+                    f.flush()
+                    os.fsync(f.fileno())
+                    modified = True
 
-                expected_head = anchor_data["head_hash"].lower()
-                expected_idx = anchor_data["index"]
-                expected_last_idx = count - 1 if count > 0 else -1
-
-                if expected_idx != expected_last_idx:
-                    print(f"[FAIL] External Anchor Index Mismatch: ledger last index {expected_last_idx} != anchor index {expected_idx}")
-                    return False
-                if expected_head != head_hash.lower():
-                    print(f"[FAIL] External Anchor Divergence: ledger head {head_hash} != anchor head {expected_head}")
-                    return False
-                print(f"[OK] External trust anchor verified: index {expected_idx}, head {expected_head}")
-
-            if count == 0:
-                if require_records:
-                    print("[FAIL] Audit ledger contains 0 records (empty ledger rejected under strict policy).")
-                    return False
-                else:
-                    print("[INFO] Audit ledger verified clean (0 records, uninitialized state).")
-                    return True
-
-            print(f"[OK] Cryptographic chain verified clean across {count:,} records.")
-            print(f"   Head Hash: {head_hash}")
-            return True
-
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        return modified
 
 
 def compute_admin_event_hash(
@@ -582,12 +647,29 @@ def validate_admin_record_schema(rec: dict, line_num: int, expected_index: int, 
         raise ValueError(f"Admin Line {line_num}: Self-digest mismatch: recorded {curr_hash}, computed {computed}")
 
 
-def verify_admin_chain(admin_log: str) -> tuple[bool, int, str, str]:
+def verify_admin_chain(admin_log: str, admin_anchor_path: str | None = None) -> tuple[bool, int, str, str]:
     """
-    Cryptographically verifies the administrative audit hash chain.
+    Cryptographically verifies the administrative audit hash chain and asserts integrity against
+    the external administrative trust anchor checkpoint if present. Detects truncation and divergence.
     Returns: (is_valid, record_count, last_hash, err_msg)
     """
+    resolved_anchor = admin_anchor_path or os.getenv("AUDIT_ADMIN_ANCHOR")
+    if not resolved_anchor:
+        resolved_anchor = f"{admin_log}.anchor.json"
+
     if not os.path.exists(admin_log):
+        if os.path.exists(resolved_anchor):
+            try:
+                with open(resolved_anchor, "r", encoding="utf-8") as af:
+                    a_data = json.load(af, object_pairs_hook=rejecting_duplicates_object_pairs_hook)
+                validate_admin_anchor_schema(a_data, resolved_anchor)
+                if a_data["admin_index"] >= 0:
+                    return False, 0, GENESIS_HASH, (
+                        f"ADMIN_LOG_TRUNCATION_DETECTED: Admin log '{admin_log}' is missing, "
+                        f"but external admin anchor '{resolved_anchor}' records index {a_data['admin_index']}."
+                    )
+            except Exception as e:
+                return False, 0, GENESIS_HASH, f"Corrupted admin anchor: {e}"
         return True, 0, GENESIS_HASH, ""
 
     admin_dir = os.path.dirname(os.path.abspath(admin_log))
@@ -614,6 +696,36 @@ def verify_admin_chain(admin_log: str) -> tuple[bool, int, str, str]:
                         return False, count, prev_hash, str(e)
                     prev_hash = rec["admin_hash"].lower()
                     count += 1
+
+            # Check against external administrative trust anchor checkpoint
+            if os.path.exists(resolved_anchor):
+                try:
+                    with open(resolved_anchor, "r", encoding="utf-8") as af:
+                        anchor_data = json.load(af, object_pairs_hook=rejecting_duplicates_object_pairs_hook)
+                    validate_admin_anchor_schema(anchor_data, resolved_anchor)
+                except Exception as e:
+                    return False, count, prev_hash, f"Failed to read or validate external admin anchor: {e}"
+
+                expected_admin_idx = anchor_data["admin_index"]
+                expected_admin_head = anchor_data["head_hash"].lower()
+                last_idx = count - 1 if count > 0 else -1
+
+                if last_idx < expected_admin_idx:
+                    return False, count, prev_hash, (
+                        f"ADMIN_LOG_TRUNCATION_DETECTED: Admin log index {last_idx} is less than "
+                        f"external admin anchor index {expected_admin_idx}. Records have been truncated!"
+                    )
+                if last_idx > expected_admin_idx:
+                    return False, count, prev_hash, (
+                        f"ADMIN_ANCHOR_BEHIND: Admin log has {count} records (index {last_idx}) "
+                        f"but external admin anchor is at index {expected_admin_idx}."
+                    )
+                if prev_hash.lower() != expected_admin_head:
+                    return False, count, prev_hash, (
+                        f"ADMIN_ANCHOR_DIVERGENCE: Admin log head {prev_hash} does not match "
+                        f"external admin anchor head {expected_admin_head}."
+                    )
+
             return True, count, prev_hash, ""
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -635,41 +747,77 @@ def _is_path_collision(path_a: str, path_b: str) -> bool:
 
 def _open_admin_log_fd_safe(admin_log: str, vault_path: str, anchor_path: str) -> tuple[int, bool]:
     """
-    Opens administrative log with restrictive permissions (0600) and verifies under open file descriptors
-    that it does not collide with vault_path or anchor_path. Rejects symlinks to eliminate TOCTOU races.
+    Atomically opens the administrative log relative to parent directory descriptor (dir_fd)
+    with O_NOFOLLOW to eliminate TOCTOU symlink substitution races.
+    Verifies under open file descriptors that the target is a regular file owned by the process UID,
+    restricts permissions to 0600, and asserts distinct inodes from vault_path and anchor_path.
     """
-    if os.path.islink(admin_log):
-        raise ValueError(f"Security violation: administrative audit log cannot be a symbolic link: {admin_log}")
-
     admin_dir = os.path.dirname(os.path.abspath(admin_log))
+    basename = os.path.basename(admin_log)
     os.makedirs(admin_dir, exist_ok=True)
 
-    is_new = not os.path.exists(admin_log)
-    open_flags = os.O_CREAT | os.O_RDWR | os.O_APPEND | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open(admin_log, open_flags, 0o600)
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    dir_fd = os.open(admin_dir, dir_flags)
     try:
-        os.chmod(admin_log, 0o600)
+        is_new = not os.path.exists(admin_log)
+        open_flags = (
+            os.O_CREAT
+            | os.O_RDWR
+            | os.O_APPEND
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            fd = os.open(basename, open_flags, 0o600, dir_fd=dir_fd)
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.EMLINK):
+                raise ValueError(f"Security violation: administrative audit log cannot be a symbolic link (O_NOFOLLOW rejection): {admin_log}")
+            raise
+    finally:
+        os.close(dir_fd)
+
+    try:
         admin_st = os.fstat(fd)
 
-        # TOCTOU Inode verification against vault file
-        if os.path.exists(vault_path):
-            v_fd = os.open(vault_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
-            try:
-                v_st = os.fstat(v_fd)
-                if (admin_st.st_dev, admin_st.st_ino) == (v_st.st_dev, v_st.st_ino):
-                    raise ValueError(f"TOCTOU Collision: administrative audit log shares inode with ledger vault file ({admin_log})")
-            finally:
-                os.close(v_fd)
+        # 1. Inode mode audit: MUST be a regular file (rejects FIFOs, devices, sockets)
+        if not stat.S_ISREG(admin_st.st_mode):
+            raise ValueError(f"Security violation: administrative audit log must be a regular file, got mode {oct(admin_st.st_mode)}: {admin_log}")
 
-        # TOCTOU Inode verification against anchor file
-        if os.path.exists(anchor_path):
-            a_fd = os.open(anchor_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        # 2. Ownership audit: MUST match process UID
+        if hasattr(os, "getuid") and admin_st.st_uid != os.getuid():
+            raise ValueError(f"Security violation: administrative audit log owner UID {admin_st.st_uid} does not match process UID {os.getuid()}: {admin_log}")
+
+        # 3. Mode lockdown: 0600
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
+
+        # 4. Inode collision check against vault file
+        if os.path.exists(vault_path):
             try:
-                a_st = os.fstat(a_fd)
-                if (admin_st.st_dev, admin_st.st_ino) == (a_st.st_dev, a_st.st_ino):
-                    raise ValueError(f"TOCTOU Collision: administrative audit log shares inode with trust anchor file ({admin_log})")
-            finally:
-                os.close(a_fd)
+                v_fd = os.open(vault_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                try:
+                    v_st = os.fstat(v_fd)
+                    if (admin_st.st_dev, admin_st.st_ino) == (v_st.st_dev, v_st.st_ino):
+                        raise ValueError(f"TOCTOU Collision: administrative audit log shares inode with ledger vault file ({admin_log})")
+                finally:
+                    os.close(v_fd)
+            except OSError:
+                pass
+
+        # 5. Inode collision check against anchor file
+        if os.path.exists(anchor_path):
+            try:
+                a_fd = os.open(anchor_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                try:
+                    a_st = os.fstat(a_fd)
+                    if (admin_st.st_dev, admin_st.st_ino) == (a_st.st_dev, a_st.st_ino):
+                        raise ValueError(f"TOCTOU Collision: administrative audit log shares inode with trust anchor file ({admin_log})")
+                finally:
+                    os.close(a_fd)
+            except OSError:
+                pass
 
         return fd, is_new
     except Exception:
@@ -680,6 +828,10 @@ def _open_admin_log_fd_safe(admin_log: str, vault_path: str, anchor_path: str) -
 def _get_admin_log_tail(admin_log: str) -> tuple[int, str]:
     """Scans admin log to retrieve the next index and prior hash."""
     if not os.path.exists(admin_log) or os.path.getsize(admin_log) == 0:
+        return 0, GENESIS_HASH
+
+    _sanitize_admin_log_eof(admin_log)
+    if os.path.getsize(admin_log) == 0:
         return 0, GENESIS_HASH
 
     count = 0
@@ -708,6 +860,7 @@ def _append_admin_event_unlocked(
     details: dict | None = None,
 ) -> dict:
     """Appends an administrative audit event to the cryptographic admin hash-chain (caller holds admin_lock)."""
+    _sanitize_admin_log_eof(admin_log)
     admin_fd, is_new = _open_admin_log_fd_safe(admin_log, vault_path, anchor_path)
     try:
         admin_index, prev_admin_hash = _get_admin_log_tail(admin_log)
@@ -774,6 +927,13 @@ def _append_admin_event_unlocked(
         finally:
             os.close(dir_fd)
 
+    # Durably advance the external administrative trust anchor checkpoint
+    admin_anchor_path = os.getenv("AUDIT_ADMIN_ANCHOR", f"{admin_log}.anchor.json")
+    try:
+        durable_write_admin_anchor(admin_anchor_path, admin_index, ts, admin_hash)
+    except Exception as e:
+        print(f"[WARN] ⚠️ Administrative event committed to {admin_log}, but admin anchor update failed: {e}")
+
     return record
 
 
@@ -817,6 +977,10 @@ def _recover_admin_transaction_unlocked(vault_path: str, anchor_path: str, admin
     """Internal recovery routine under held locks (Level 1 Vault and Level 2 Admin)."""
     if not os.path.exists(admin_log) or os.path.getsize(admin_log) == 0:
         return {"status": "CLEAN", "message": "No administrative log found"}
+
+    _sanitize_admin_log_eof(admin_log)
+    if os.path.getsize(admin_log) == 0:
+        return {"status": "CLEAN", "message": "Administrative log is empty after trimming partial write"}
 
     last_rec = None
     with open(admin_log, "r", encoding="utf-8") as f:
@@ -1244,20 +1408,23 @@ def verify_chain(vault_path: str, require_records: bool = False, anchor_path: st
                     return False
                 print(f"[OK] External trust anchor verified: index {expected_idx}, head {expected_head}")
 
-                # If admin log exists, verify its cryptographic hash chain and reconcile any open transactions
+                # If admin log exists, reconcile open transactions and verify its cryptographic hash chain against external admin anchor
                 anchor_dir = os.path.dirname(os.path.abspath(anchor_path))
                 admin_log = os.getenv("AUDIT_VAULT_ADMIN_LOG", os.path.join(anchor_dir, ".audit_vault_admin.log"))
                 if os.path.exists(admin_log) and os.path.getsize(admin_log) > 0:
-                    admin_ok, admin_count, admin_head, admin_err = verify_admin_chain(admin_log)
-                    if not admin_ok:
-                        print(f"[FAIL] Administrative audit log hash-chain verification failed: {admin_err}")
-                        return False
-                    print(f"[OK] Administrative audit hash-chain verified clean across {admin_count} events (Head: {admin_head[:16]}...)")
-
                     rec_result = recover_admin_transaction(vault_path, anchor_path, admin_audit_log=admin_log)
                     if rec_result["status"] == "RECOVERY_REQUIRED":
                         print(f"[FAIL] Administrative audit trail has unresolved recovery state: {rec_result['message']}")
                         return False
+                    elif rec_result["status"] in {"RECONCILED_COMMITTED", "RECONCILED_ABORTED"}:
+                        print(f"[INFO] Interrupted administrative transaction was automatically reconciled: {rec_result['message']}")
+
+                    admin_anchor = os.getenv("AUDIT_ADMIN_ANCHOR", f"{admin_log}.anchor.json")
+                    admin_ok, admin_count, admin_head, admin_err = verify_admin_chain(admin_log, admin_anchor_path=admin_anchor)
+                    if not admin_ok:
+                        print(f"[FAIL] Administrative audit log hash-chain verification failed: {admin_err}")
+                        return False
+                    print(f"[OK] Administrative audit hash-chain verified clean across {admin_count} events (Head: {admin_head[:16]}...)")
 
             if count == 0:
                 if require_records:
@@ -1276,13 +1443,14 @@ def verify_chain(vault_path: str, require_records: bool = False, anchor_path: st
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Cryptographically Tamper-Evident Audit Vault (v1.3.6)")
+    parser = argparse.ArgumentParser(description="Cryptographically Tamper-Evident Audit Vault (v1.3.7)")
     parser.add_argument("--vault-file", default=DEFAULT_VAULT_FILE, help="Path to audit_chain.jsonl")
     parser.add_argument("--verify", action="store_true", help="Verify chain integrity")
     parser.add_argument("--verify-admin", action="store_true", help="Cryptographically verify administrative audit hash-chain")
     parser.add_argument("--recover-admin", action="store_true", help="Reconcile incomplete administrative transactions")
     parser.add_argument("--require-records", action="store_true", help="Reject empty ledgers during verification")
     parser.add_argument("--anchor-file", help="Path to external trust anchor checkpoint")
+    parser.add_argument("--admin-anchor-file", help="Path to external administrative trust anchor checkpoint")
     parser.add_argument("--init-anchor", action="store_true", help="Explicitly bootstrap trust anchor from verified ledger")
     parser.add_argument("--force", action="store_true", help="Force overwrite existing anchor during --init-anchor")
     parser.add_argument("--reason", help="Mandatory documented reason for anchor reset when using --force")
@@ -1306,7 +1474,8 @@ def main():
                 admin_log = os.path.join(anchor_dir, ".audit_vault_admin.log")
             else:
                 admin_log = ".audit_vault_admin.log"
-        is_valid, count, head, err = verify_admin_chain(admin_log)
+        admin_anchor = args.admin_anchor_file or os.getenv("AUDIT_ADMIN_ANCHOR", f"{admin_log}.anchor.json")
+        is_valid, count, head, err = verify_admin_chain(admin_log, admin_anchor_path=admin_anchor)
         if not is_valid:
             print(f"[FAIL] Administrative audit chain verification failed: {err}")
             sys.exit(1)

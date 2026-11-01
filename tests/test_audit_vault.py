@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Unit Test Suite for Cryptographically Tamper-Evident Audit Vault (v1.3.6)
+Unit Test Suite for Cryptographically Tamper-Evident Audit Vault (v1.3.7)
 Tests schema verification, canonical path collision defenses, bounded recursive depth,
 anchor index boundary conditions, cryptographic administrative hash-chains,
-TOCTOU-immune open file descriptor checks, and crash-recovery transaction reconciliation.
+TOCTOU-immune dir_fd O_NOFOLLOW open checks, regular file mode enforcement,
+external administrative trust anchor checkpoints with truncation and divergence detection,
+crash-recovery transaction reconciliation with EOF partial-write cleanup, and multi-operation concurrency.
 """
 
 import os
@@ -237,6 +239,17 @@ class TestTOCTOUAndSymlinkHardening(unittest.TestCase):
             _open_admin_log_fd_safe(self.admin_log, self.vault_file, self.anchor_file)
         self.assertIn("shares inode with ledger vault file", str(ctx.exception))
 
+    def test_open_admin_log_rejects_fifo(self):
+        fifo_path = os.path.join(self.tmpdir.name, "fifo_admin.log")
+        try:
+            os.mkfifo(fifo_path)
+        except (AttributeError, OSError):
+            self.skipTest("mkfifo not supported on environment")
+
+        with self.assertRaises(ValueError) as ctx:
+            _open_admin_log_fd_safe(fifo_path, self.vault_file, self.anchor_file)
+        self.assertIn("must be a regular file", str(ctx.exception))
+
 
 class TestAdminLogHashChain(unittest.TestCase):
     def setUp(self):
@@ -275,6 +288,46 @@ class TestAdminLogHashChain(unittest.TestCase):
         is_valid, count, head, err = verify_admin_chain(self.admin_log)
         self.assertFalse(is_valid)
         self.assertIn("Self-digest mismatch", err)
+
+    def test_admin_log_truncation_detection(self):
+        tx1 = "tx-001"
+        _append_admin_event(self.admin_log, "TRUST_ROOT_RESET_PREPARED", tx1, self.anchor_file, self.vault_file, "reason 1", None, "a"*64, 0)
+        _append_admin_event(self.admin_log, "TRUST_ROOT_RESET_COMMITTED", tx1, self.anchor_file, self.vault_file, "reason 1", None, "a"*64, 0)
+        _append_admin_event(self.admin_log, "TRUST_ROOT_RESET_PREPARED", "tx-002", self.anchor_file, self.vault_file, "reason 2", {"index": 0}, "b"*64, 1)
+
+        admin_anchor = f"{self.admin_log}.anchor.json"
+        self.assertTrue(os.path.exists(admin_anchor))
+
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertTrue(is_valid)
+        self.assertEqual(count, 3)
+
+        # Truncate admin log: remove last line
+        with open(self.admin_log, "r") as f:
+            lines = f.readlines()
+        with open(self.admin_log, "w") as f:
+            f.writelines(lines[:-1])
+
+        # Verify admin chain detects truncation against the external anchor
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertFalse(is_valid)
+        self.assertIn("ADMIN_LOG_TRUNCATION_DETECTED", err)
+
+    def test_admin_log_anchor_divergence_detection(self):
+        tx1 = "tx-001"
+        _append_admin_event(self.admin_log, "TRUST_ROOT_RESET_PREPARED", tx1, self.anchor_file, self.vault_file, "reason 1", None, "a"*64, 0)
+
+        admin_anchor = f"{self.admin_log}.anchor.json"
+        with open(admin_anchor, "r") as f:
+            anchor_data = json.load(f)
+
+        anchor_data["head_hash"] = "0" * 64
+        with open(admin_anchor, "w") as f:
+            json.dump(anchor_data, f)
+
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertFalse(is_valid)
+        self.assertIn("ADMIN_ANCHOR_DIVERGENCE", err)
 
 
 class TestAdminCrashRecoveryMatrix(unittest.TestCase):
@@ -322,6 +375,105 @@ class TestAdminCrashRecoveryMatrix(unittest.TestCase):
         is_valid, count, head, err = verify_admin_chain(self.admin_log)
         self.assertTrue(is_valid)
         self.assertEqual(count, 2)
+
+    def test_recovery_boundary_2_crash_after_temp_file_fsync(self):
+        """Boundary 2: Crash after temporary anchor file fsync, before atomic rename."""
+        tx_id = "tx-boundary-2"
+        target_head = "d" * 64
+        target_idx = 10
+
+        _append_admin_event(
+            self.admin_log,
+            "TRUST_ROOT_RESET_PREPARED",
+            tx_id,
+            self.anchor_file,
+            self.vault_file,
+            "Emergency reset",
+            self.prior_anchor,
+            target_head,
+            target_idx
+        )
+
+        # Write temporary anchor file simulating Boundary 2 state
+        anchor_tmp = f"{self.anchor_file}.tmp.simulated"
+        with open(anchor_tmp, "w") as f:
+            json.dump({
+                "version": 1,
+                "index": target_idx,
+                "timestamp": 1700000000.0,
+                "head_hash": target_head
+            }, f)
+
+        # Disk anchor remains prior_anchor (rename never happened)
+        res = recover_admin_transaction(self.vault_file, self.anchor_file, admin_audit_log=self.admin_log)
+        self.assertEqual(res["status"], "RECONCILED_ABORTED")
+
+        # Verify prior anchor remains authoritative
+        with open(self.anchor_file, "r") as f:
+            curr_anchor = json.load(f)
+        self.assertEqual(curr_anchor["head_hash"], self.prior_anchor["head_hash"])
+        self.assertEqual(curr_anchor["index"], self.prior_anchor["index"])
+
+        # Check admin log chain
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertTrue(is_valid)
+        self.assertEqual(count, 2)
+
+    def test_recovery_after_partial_write_at_eof(self):
+        """Recovery cleans un-newline-terminated trailing partial write at EOF and reconciles."""
+        tx_id = "tx-partial"
+        target_head = "9" * 64
+        target_idx = 10
+
+        _append_admin_event(
+            self.admin_log,
+            "TRUST_ROOT_RESET_PREPARED",
+            tx_id,
+            self.anchor_file,
+            self.vault_file,
+            "Interrupted write test",
+            self.prior_anchor,
+            target_head,
+            target_idx
+        )
+
+        # Inject trailing un-newline-terminated partial line at EOF
+        with open(self.admin_log, "ab") as f:
+            f.write(b'{"action": "TRUST_ROOT_RESET_RECONCILED_COMMITTED", "admin_index": 1, "partial": ')
+
+        res = recover_admin_transaction(self.vault_file, self.anchor_file, admin_audit_log=self.admin_log)
+        self.assertEqual(res["status"], "RECONCILED_ABORTED")
+
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertTrue(is_valid, f"Chain should be valid after partial write recovery: {err}")
+        self.assertEqual(count, 2)
+
+    def test_recovery_idempotency(self):
+        """Repeated recovery executions on already reconciled transactions are no-op returning CLEAN."""
+        tx_id = "tx-idempotent"
+        _append_admin_event(
+            self.admin_log,
+            "TRUST_ROOT_RESET_PREPARED",
+            tx_id,
+            self.anchor_file,
+            self.vault_file,
+            "Idempotency test",
+            self.prior_anchor,
+            "a" * 64,
+            5
+        )
+
+        res1 = recover_admin_transaction(self.vault_file, self.anchor_file, admin_audit_log=self.admin_log)
+        self.assertEqual(res1["status"], "RECONCILED_ABORTED")
+
+        # Second recovery call MUST be a no-op returning CLEAN
+        res2 = recover_admin_transaction(self.vault_file, self.anchor_file, admin_audit_log=self.admin_log)
+        self.assertEqual(res2["status"], "CLEAN")
+        self.assertIn("already resolved", res2["message"])
+
+        # Third recovery call still CLEAN
+        res3 = recover_admin_transaction(self.vault_file, self.anchor_file, admin_audit_log=self.admin_log)
+        self.assertEqual(res3["status"], "CLEAN")
 
     def test_recovery_boundary_3_crash_after_rename_reconciles_committed(self):
         """Boundary 3: Crash after atomic rename; anchor was replaced on disk before crash."""
@@ -495,11 +647,44 @@ def _concurrent_worker(vault_file, anchor_file, worker_id, count):
             pass
 
 
+def _concurrent_appender(vault_file, anchor_file, worker_id, count):
+    for i in range(count):
+        try:
+            append_record(vault_file, f"worker.{worker_id}", {"seq": i, "worker": worker_id}, anchor_path=anchor_file)
+        except Exception:
+            pass
+
+
+def _concurrent_resetter(vault_file, anchor_file, admin_log, count):
+    for i in range(count):
+        try:
+            init_anchor(vault_file, anchor_file, force=True, reason=f"Concurrent reset iteration {i}", admin_audit_log=admin_log)
+        except Exception:
+            pass
+
+
+def _concurrent_verifier(vault_file, anchor_file, count):
+    for _ in range(count):
+        try:
+            verify_chain(vault_file, require_records=False, anchor_path=anchor_file)
+        except Exception:
+            pass
+
+
+def _concurrent_recoverer(vault_file, anchor_file, admin_log, count):
+    for _ in range(count):
+        try:
+            recover_admin_transaction(vault_file, anchor_file, admin_audit_log=admin_log)
+        except Exception:
+            pass
+
+
 class TestMultiprocessConcurrency(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.vault_file = os.path.join(self.tmpdir.name, "ledger.jsonl")
         self.anchor_file = os.path.join(self.tmpdir.name, "anchor.json")
+        self.admin_log = os.path.join(self.tmpdir.name, "admin.log")
         with open(self.vault_file, "w") as f:
             f.write("")
         init_anchor(self.vault_file, self.anchor_file)
@@ -522,6 +707,54 @@ class TestMultiprocessConcurrency(unittest.TestCase):
             self.assertFalse(p.is_alive(), "Worker process timed out or deadlocked")
 
         self.assertTrue(verify_chain(self.vault_file, require_records=True, anchor_path=self.anchor_file))
+
+    def test_concurrent_append_and_admin_reset(self):
+        processes = []
+        for wid in range(2):
+            p = multiprocessing.Process(target=_concurrent_appender, args=(self.vault_file, self.anchor_file, wid, 15))
+            processes.append(p)
+            p.start()
+
+        r_p = multiprocessing.Process(target=_concurrent_resetter, args=(self.vault_file, self.anchor_file, self.admin_log, 3))
+        processes.append(r_p)
+        r_p.start()
+
+        for p in processes:
+            p.join(timeout=10.0)
+            self.assertFalse(p.is_alive(), "Process timed out or deadlocked under concurrent append + reset")
+
+        self.assertTrue(verify_chain(self.vault_file, require_records=False, anchor_path=self.anchor_file))
+
+    def test_concurrent_reset_and_recovery(self):
+        processes = []
+        r_p = multiprocessing.Process(target=_concurrent_resetter, args=(self.vault_file, self.anchor_file, self.admin_log, 4))
+        rec_p = multiprocessing.Process(target=_concurrent_recoverer, args=(self.vault_file, self.anchor_file, self.admin_log, 8))
+        processes.extend([r_p, rec_p])
+        for p in processes:
+            p.start()
+
+        for p in processes:
+            p.join(timeout=10.0)
+            self.assertFalse(p.is_alive(), "Process timed out or deadlocked under concurrent reset + recovery")
+
+        self.assertTrue(verify_chain(self.vault_file, require_records=False, anchor_path=self.anchor_file))
+
+    def test_concurrent_verify_and_reset(self):
+        processes = []
+        for _ in range(2):
+            v_p = multiprocessing.Process(target=_concurrent_verifier, args=(self.vault_file, self.anchor_file, 10))
+            processes.append(v_p)
+            v_p.start()
+
+        r_p = multiprocessing.Process(target=_concurrent_resetter, args=(self.vault_file, self.anchor_file, self.admin_log, 3))
+        processes.append(r_p)
+        r_p.start()
+
+        for p in processes:
+            p.join(timeout=10.0)
+            self.assertFalse(p.is_alive(), "Process timed out or deadlocked under concurrent verify + reset")
+
+        self.assertTrue(verify_chain(self.vault_file, require_records=False, anchor_path=self.anchor_file))
 
 
 if __name__ == "__main__":
