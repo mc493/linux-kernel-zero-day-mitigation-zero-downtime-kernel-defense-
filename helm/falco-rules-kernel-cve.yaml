@@ -35,6 +35,13 @@ customRules:
       priority: CRITICAL
       tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp, weaponization]
 
+    - rule: Detect Host-Level kTLS Activation Attempt (CVE-2025-39682)
+      desc: Detects unconfined host processes attempting to attach kTLS TCP_ULP or configure SOL_TLS (failed probe)
+      condition: container.id = host and evt.type = setsockopt and evt.failed = true and ((evt.rawarg.level = 6 and evt.rawarg.optname = 31) or (evt.rawarg.level = 282))
+      output: "NOTICE: Host kTLS Activation Attempt (res=%evt.res level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name comm=%proc.pcmdline)"
+      priority: NOTICE
+      tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp, host_monitoring]
+
     - rule: Detect Host-Level kTLS Activation (CVE-2025-39682)
       desc: Detects unconfined host processes activating kTLS TCP_ULP or SOL_TLS outside container boundaries
       condition: container.id = host and evt.type = setsockopt and evt.failed = false and ((evt.rawarg.level = 6 and evt.rawarg.optname = 31) or (evt.rawarg.level = 282))

@@ -64,7 +64,8 @@ elif [ "$TEST2_OUTPUT" = "PROBE_TRIGGERED" ]; then
         if tail -n 200 "$AUDIT_LOG" | grep -q "AF_ALG"; then
             echo "[PASS] PASSED (Alert verified in hash chain)"
         else
-            echo "[INFO] UNVERIFIED (No recent AF_ALG alert in last 200 audit events)"
+            echo "[FAIL] FAILED (No recent AF_ALG alert in last 200 audit events)"
+            FAILURES=$((FAILURES + 1))
         fi
     else
         echo "  -> Note: Set AUDIT_LOG to verify end-to-end ledger propagation."
@@ -158,7 +159,8 @@ elif [ "$P1_RES" = "ATTACHED" ] || [ "$P2_RES" = "CONFIGURED" ]; then
         if tail -n 200 "$AUDIT_LOG" | grep -q -E "kTLS|TCP_ULP"; then
             echo "[PASS] PASSED (Alert verified in hash chain)"
         else
-            echo "[INFO] UNVERIFIED (No recent kTLS alert in last 200 audit events)"
+            echo "[FAIL] FAILED (No recent kTLS alert in last 200 audit events)"
+            FAILURES=$((FAILURES + 1))
         fi
     fi
 else
@@ -170,34 +172,76 @@ SECCOMP_PROFILE="./seccomp/seccomp-kernel-cve-mitigation.json"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && [ -f "$SECCOMP_PROFILE" ]; then
     echo -n "[Test 4/4] OCI Container Synchronous SECCOMP Profile Enforcement: "
     SECCOMP_OUTPUT=$(docker run --rm --security-opt seccomp="$SECCOMP_PROFILE" python:3.11-alpine python3 -c "
-import socket
+import socket, threading, errno, sys
 
-blocked = []
+results = {}
+
+# Test 4.1: AF_ALG exact EPERM assertion
 try:
-    socket.socket(38, socket.SOCK_SEQPACKET, 0)
-except (PermissionError, OSError):
-    blocked.append('AF_ALG')
+    s = socket.socket(38, socket.SOCK_SEQPACKET, 0)
+    results['AF_ALG'] = 'UNBLOCKED'
+    s.close()
+except OSError as e:
+    if e.errno == errno.EPERM:
+        results['AF_ALG'] = 'BLOCKED_EPERM'
+    else:
+        results['AF_ALG'] = f'FAIL_{errno.errorcode.get(e.errno, e.errno)}'
 
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# Establish loopback connection for Phase 1 & 2 tests
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(('127.0.0.1', 0))
+srv.listen(1)
+port = srv.getsockname()[1]
+
+active_conn = None
+def accept():
+    global active_conn
+    try:
+        active_conn, _ = srv.accept()
+    except Exception:
+        pass
+t = threading.Thread(target=accept)
+t.daemon = True
+t.start()
+
+cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+cli.connect(('127.0.0.1', port))
+t.join(timeout=2.0)
+
+# Test 4.2: Phase 1 TCP_ULP exact EPERM assertion
 try:
-    s.setsockopt(6, 31, b'tls\0')
-except (PermissionError, OSError):
-    blocked.append('TCP_ULP')
+    cli.setsockopt(6, 31, b'tls\0')
+    results['TCP_ULP'] = 'UNBLOCKED'
+except OSError as e:
+    if e.errno == errno.EPERM:
+        results['TCP_ULP'] = 'BLOCKED_EPERM'
+    else:
+        results['TCP_ULP'] = f'FAIL_{errno.errorcode.get(e.errno, e.errno)}'
 
+# Test 4.3: Phase 2 SOL_TLS exact EPERM assertion
 try:
-    s.setsockopt(282, 1, b'\x00'*40)
-except (PermissionError, OSError):
-    blocked.append('SOL_TLS')
-s.close()
+    cli.setsockopt(282, 1, b'\x00'*40)
+    results['SOL_TLS'] = 'UNBLOCKED'
+except OSError as e:
+    if e.errno == errno.EPERM:
+        results['SOL_TLS'] = 'BLOCKED_EPERM'
+    else:
+        results['SOL_TLS'] = f'FAIL_{errno.errorcode.get(e.errno, e.errno)}'
 
-if len(blocked) == 3:
-    print('ALL_BLOCKED')
+cli.close()
+if active_conn:
+    active_conn.close()
+srv.close()
+
+if all(v == 'BLOCKED_EPERM' for v in results.values()):
+    print('ALL_BLOCKED_EPERM')
 else:
-    print('PARTIAL:' + ','.join(blocked))
+    print('LEAK:' + str(results))
 " 2>/dev/null || echo "DOCKER_RUN_FAILED")
 
-    if [ "$SECCOMP_OUTPUT" = "ALL_BLOCKED" ]; then
-        echo "[PASS] PASSED (AF_ALG, TCP_ULP, SOL_TLS synchronously rejected with EPERM)"
+    if [ "$SECCOMP_OUTPUT" = "ALL_BLOCKED_EPERM" ]; then
+        echo "[PASS] PASSED (AF_ALG, TCP_ULP, SOL_TLS synchronously rejected with exact EPERM)"
     elif [ "$SECCOMP_OUTPUT" = "DOCKER_RUN_FAILED" ]; then
         echo "[INFO] SKIPPED (Container image not cached or pull disabled)"
     else

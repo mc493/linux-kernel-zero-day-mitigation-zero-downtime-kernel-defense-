@@ -194,19 +194,36 @@ customRules:
       output: "CRITICAL: Container kTLS Successfully Bound in Kernel (res=%evt.res level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name container=%container.name)"
       priority: CRITICAL
       tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp, weaponization]
+
+    - rule: Detect Host-Level kTLS Activation Attempt (CVE-2025-39682)
+      desc: Detects unconfined host processes attempting to attach kTLS TCP_ULP or configure SOL_TLS (failed probe)
+      condition: container.id = host and evt.type = setsockopt and evt.failed = true and 
+                 ((evt.rawarg.level = 6 and evt.rawarg.optname = 31) or (evt.rawarg.level = 282))
+      output: "NOTICE: Host kTLS Activation Attempt (res=%evt.res level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name comm=%proc.pcmdline)"
+      priority: NOTICE
+      tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp, host_monitoring]
+
+    - rule: Detect Host-Level kTLS Activation (CVE-2025-39682)
+      desc: Detects unconfined host processes activating kTLS TCP_ULP or SOL_TLS outside container boundaries
+      condition: container.id = host and evt.type = setsockopt and evt.failed = false and 
+                 ((evt.rawarg.level = 6 and evt.rawarg.optname = 31) or (evt.rawarg.level = 282))
+      output: "NOTICE: Host kTLS Activation Detected (res=%evt.res level=%evt.rawarg.level optname=%evt.rawarg.optname user=%user.name proc=%proc.name comm=%proc.pcmdline)"
+      priority: NOTICE
+      tags: [cve, zero-day, cve-2025-39682, ktls, tcp_ulp, host_monitoring]
 ```
 
 > **Threat Taxonomy (Exposure Gate vs. Payload Trigger):** CVE-2025-39682 resides in the kernel software receive path (`tls_sw_recvmsg()` / `rx_list` zero-length TLS records). A `setsockopt` call is the **attack surface expansion gate (precondition)**, not the payload trigger itself. By shutting the door at capability activation, unprivileged containers are blocked from exposing the kernel to the vulnerable receive path.
 
-### 3. Production Stability: Linux 7.0 ABI Filter Invariant
-On modern Linux kernels (Linux 7.0+ HWE), Falco's userspace inspector engine (`sinsp`) encounters register parsing mismatches on `openat` parameters (`sinsp_exception: could not parse param 2 (name)`). 
+### 3. Production Stability: Linux 7.0 ABI Filter Invariant (`!openat`)
+On modern Linux kernels (Linux 7.0+ HWE), Falco's userspace inspector engine (`libsinsp` <= 0.45 with `modern_ebpf`) encounters register parsing mismatches on `openat` string parameters (`sinsp_exception: could not parse param 2 (name)`), causing DaemonSet crash loops. 
 
-To ensure continuous DaemonSet stability without crash loops:
+To ensure continuous driver stability on cutting-edge kernels without affecting socket/networking syscall telemetry:
 ```yaml
 falco:
   base_syscalls:
     custom_set: ['!openat']
 ```
+*Note:* This filter exclusively bypasses `openat` path resolution. All networking syscalls (`socket`, `setsockopt`, `bind`, `connect`, `sendmsg`) remain fully monitored. On Linux 5.x/6.x LTS kernels or when using the classic kernel module driver, `!openat` can be removed to restore full filesystem call tracking.
 
 ### 4. Synchronous Inline Blocking via SECCOMP (`seccomp-kernel-cve-mitigation.json`)
 While Falco eBPF provides asynchronous detection and forensic ledger recording, synchronous prevention requires SECCOMP gating to reject malicious syscalls before kernel subsystem handlers are reached.
