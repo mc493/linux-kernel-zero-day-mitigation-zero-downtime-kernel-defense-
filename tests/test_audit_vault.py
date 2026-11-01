@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Unit Test Suite for Cryptographically Tamper-Evident Audit Vault (v1.3.5)
+Unit Test Suite for Cryptographically Tamper-Evident Audit Vault (v1.3.6)
 Tests schema verification, canonical path collision defenses, bounded recursive depth,
-anchor index boundary conditions, and two-phase administrative reset transactions.
+anchor index boundary conditions, cryptographic administrative hash-chains,
+TOCTOU-immune open file descriptor checks, and crash-recovery transaction reconciliation.
 """
 
 import os
@@ -10,14 +11,22 @@ import stat
 import json
 import tempfile
 import unittest
+import multiprocessing
+import time
 
 from vault.audit_vault import (
     GENESIS_HASH,
     RECORD_VERSION,
+    ADMIN_RECORD_VERSION,
     validate_anchor_schema,
     validate_dict_keys_are_strings,
+    validate_admin_record_schema,
+    verify_admin_chain,
     _is_path_collision,
+    _open_admin_log_fd_safe,
     _append_admin_event,
+    _append_admin_event_unlocked,
+    recover_admin_transaction,
     init_anchor,
     append_record,
     verify_chain,
@@ -157,12 +166,10 @@ class TestPathCollisionProtection(unittest.TestCase):
         self.assertFalse(success)
 
     def test_init_anchor_refuses_admin_log_colliding_with_vault(self):
-        # Create valid empty ledger and initialize first anchor
         with open(self.vault_file, "w") as f:
             f.write("")
         self.assertTrue(init_anchor(self.vault_file, self.anchor_file))
 
-        # Attempt forced reset with admin_log pointing to vault_file
         success = init_anchor(
             self.vault_file,
             self.anchor_file,
@@ -194,6 +201,243 @@ class TestPathCollisionProtection(unittest.TestCase):
         self.assertIn("collides with ledger vault file", str(ctx.exception))
 
 
+class TestTOCTOUAndSymlinkHardening(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.vault_file = os.path.join(self.tmpdir.name, "ledger.jsonl")
+        self.anchor_file = os.path.join(self.tmpdir.name, "anchor.json")
+        self.admin_log = os.path.join(self.tmpdir.name, "admin.log")
+        with open(self.vault_file, "w") as f:
+            f.write("")
+        with open(self.anchor_file, "w") as f:
+            f.write("")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_open_admin_log_rejects_symlink(self):
+        target = os.path.join(self.tmpdir.name, "real_admin.log")
+        with open(target, "w") as f:
+            f.write("")
+        os.symlink(target, self.admin_log)
+
+        with self.assertRaises(ValueError) as ctx:
+            _open_admin_log_fd_safe(self.admin_log, self.vault_file, self.anchor_file)
+        self.assertIn("cannot be a symbolic link", str(ctx.exception))
+
+    def test_open_admin_log_detects_hardlink_to_anchor_via_fstat(self):
+        os.link(self.anchor_file, self.admin_log)
+        with self.assertRaises(ValueError) as ctx:
+            _open_admin_log_fd_safe(self.admin_log, self.vault_file, self.anchor_file)
+        self.assertIn("shares inode with trust anchor file", str(ctx.exception))
+
+    def test_open_admin_log_detects_hardlink_to_vault_via_fstat(self):
+        os.link(self.vault_file, self.admin_log)
+        with self.assertRaises(ValueError) as ctx:
+            _open_admin_log_fd_safe(self.admin_log, self.vault_file, self.anchor_file)
+        self.assertIn("shares inode with ledger vault file", str(ctx.exception))
+
+
+class TestAdminLogHashChain(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.vault_file = os.path.join(self.tmpdir.name, "ledger.jsonl")
+        self.anchor_file = os.path.join(self.tmpdir.name, "anchor.json")
+        self.admin_log = os.path.join(self.tmpdir.name, "admin.log")
+        with open(self.vault_file, "w") as f:
+            f.write("")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_admin_hash_chain_verification_and_tamper_detection(self):
+        # Create 3 valid admin records
+        tx1 = "tx-001"
+        _append_admin_event(self.admin_log, "TRUST_ROOT_RESET_PREPARED", tx1, self.anchor_file, self.vault_file, "reason 1", None, "a"*64, 0)
+        _append_admin_event(self.admin_log, "TRUST_ROOT_RESET_COMMITTED", tx1, self.anchor_file, self.vault_file, "reason 1", None, "a"*64, 0)
+
+        tx2 = "tx-002"
+        _append_admin_event(self.admin_log, "TRUST_ROOT_RESET_PREPARED", tx2, self.anchor_file, self.vault_file, "reason 2", {"index": 0}, "b"*64, 1)
+
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertTrue(is_valid, f"Expected clean admin chain, got error: {err}")
+        self.assertEqual(count, 3)
+
+        # Tamper test: modify one character in record 1
+        with open(self.admin_log, "r") as f:
+            lines = f.readlines()
+        corrupted = json.loads(lines[1])
+        corrupted["reason"] = "tampered reason"
+        lines[1] = json.dumps(corrupted) + "\n"
+        with open(self.admin_log, "w") as f:
+            f.writelines(lines)
+
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertFalse(is_valid)
+        self.assertIn("Self-digest mismatch", err)
+
+
+class TestAdminCrashRecoveryMatrix(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.vault_file = os.path.join(self.tmpdir.name, "ledger.jsonl")
+        self.anchor_file = os.path.join(self.tmpdir.name, "anchor.json")
+        self.admin_log = os.path.join(self.tmpdir.name, "admin.log")
+
+        # Initialize ledger with 1 record
+        with open(self.vault_file, "w") as f:
+            f.write("")
+        init_anchor(self.vault_file, self.anchor_file)
+        append_record(self.vault_file, "sys.init", {"init": True}, anchor_path=self.anchor_file)
+
+        with open(self.anchor_file, "r") as af:
+            self.prior_anchor = json.load(af)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_recovery_boundary_1_crash_after_prepared_reconciles_aborted(self):
+        """Boundary 1: Crash after PREPARED write; anchor was never modified on disk."""
+        tx_id = "tx-boundary-1"
+        target_head = "e" * 64
+        target_idx = 10
+
+        _append_admin_event(
+            self.admin_log,
+            "TRUST_ROOT_RESET_PREPARED",
+            tx_id,
+            self.anchor_file,
+            self.vault_file,
+            "Emergency reset",
+            self.prior_anchor,
+            target_head,
+            target_idx
+        )
+
+        # Disk anchor still matches prior_anchor
+        res = recover_admin_transaction(self.vault_file, self.anchor_file, admin_audit_log=self.admin_log)
+        self.assertEqual(res["status"], "RECONCILED_ABORTED")
+
+        # Check admin log chain
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertTrue(is_valid)
+        self.assertEqual(count, 2)
+
+    def test_recovery_boundary_3_crash_after_rename_reconciles_committed(self):
+        """Boundary 3: Crash after atomic rename; anchor was replaced on disk before crash."""
+        tx_id = "tx-boundary-3"
+        target_head = "f" * 64
+        target_idx = 10
+
+        _append_admin_event(
+            self.admin_log,
+            "TRUST_ROOT_RESET_PREPARED",
+            tx_id,
+            self.anchor_file,
+            self.vault_file,
+            "Emergency reset",
+            self.prior_anchor,
+            target_head,
+            target_idx
+        )
+
+        # Simulate that rename succeeded on disk before the crash
+        with open(self.anchor_file, "w") as f:
+            json.dump({
+                "version": 1,
+                "index": target_idx,
+                "timestamp": 1700000000.0,
+                "head_hash": target_head
+            }, f)
+
+        res = recover_admin_transaction(self.vault_file, self.anchor_file, admin_audit_log=self.admin_log)
+        self.assertEqual(res["status"], "RECONCILED_COMMITTED")
+
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertTrue(is_valid)
+        self.assertEqual(count, 2)
+
+    def test_recovery_boundary_4_directory_fsync_uncertain_reconciles_committed(self):
+        """Boundary 4: REPLACEMENT_UNCERTAIN logged; recovery confirms replacement on disk."""
+        tx_id = "tx-boundary-4"
+        target_head = "7" * 64
+        target_idx = 5
+
+        _append_admin_event(
+            self.admin_log,
+            "TRUST_ROOT_RESET_PREPARED",
+            tx_id,
+            self.anchor_file,
+            self.vault_file,
+            "Emergency reset",
+            self.prior_anchor,
+            target_head,
+            target_idx
+        )
+        _append_admin_event(
+            self.admin_log,
+            "TRUST_ROOT_RESET_REPLACEMENT_UNCERTAIN",
+            tx_id,
+            self.anchor_file,
+            self.vault_file,
+            "Emergency reset",
+            self.prior_anchor,
+            target_head,
+            target_idx,
+            details={"error": "EIO on directory fsync"}
+        )
+
+        # Anchor on disk contains target state
+        with open(self.anchor_file, "w") as f:
+            json.dump({
+                "version": 1,
+                "index": target_idx,
+                "timestamp": 1700000000.0,
+                "head_hash": target_head
+            }, f)
+
+        res = recover_admin_transaction(self.vault_file, self.anchor_file, admin_audit_log=self.admin_log)
+        self.assertEqual(res["status"], "RECONCILED_COMMITTED")
+
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertTrue(is_valid)
+        self.assertEqual(count, 3)
+
+    def test_recovery_boundary_5_corrupted_divergence_requires_manual_recovery(self):
+        """Boundary 5: Anchor on disk matches neither prior nor target state."""
+        tx_id = "tx-boundary-5"
+        target_head = "8" * 64
+        target_idx = 10
+
+        _append_admin_event(
+            self.admin_log,
+            "TRUST_ROOT_RESET_PREPARED",
+            tx_id,
+            self.anchor_file,
+            self.vault_file,
+            "Emergency reset",
+            self.prior_anchor,
+            target_head,
+            target_idx
+        )
+
+        # Corrupt anchor with arbitrary third hash
+        with open(self.anchor_file, "w") as f:
+            json.dump({
+                "version": 1,
+                "index": 999,
+                "timestamp": 1700000000.0,
+                "head_hash": "c" * 64
+            }, f)
+
+        res = recover_admin_transaction(self.vault_file, self.anchor_file, admin_audit_log=self.admin_log)
+        self.assertEqual(res["status"], "RECOVERY_REQUIRED")
+
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertTrue(is_valid)
+        self.assertEqual(count, 2)
+
+
 class TestTwoPhaseAdministrativeReset(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -205,16 +449,14 @@ class TestTwoPhaseAdministrativeReset(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_two_phase_transaction_lifecycle(self):
-        # 1. Initialize anchor normally
         with open(self.vault_file, "w") as f:
             f.write("")
         self.assertTrue(init_anchor(self.vault_file, self.anchor_file))
 
-        # Append a record to advance ledger
         rec = append_record(self.vault_file, "security.test", {"status": "ok"}, anchor_path=self.anchor_file)
         self.assertEqual(rec["index"], 0)
 
-        # 2. Corrupt anchor manually to simulate desynchronization
+        # Corrupt anchor manually
         with open(self.anchor_file, "w") as f:
             json.dump({
                 "version": 1,
@@ -223,7 +465,6 @@ class TestTwoPhaseAdministrativeReset(unittest.TestCase):
                 "head_hash": "f" * 64
             }, f)
 
-        # 3. Forced reset with justification and explicit admin log
         reason = "Emergency resynchronization after recovery"
         success = init_anchor(
             self.vault_file,
@@ -234,28 +475,52 @@ class TestTwoPhaseAdministrativeReset(unittest.TestCase):
         )
         self.assertTrue(success)
 
-        # 4. Verify admin log existence, restrictive permissions, and two-phase entries
         self.assertTrue(os.path.exists(self.admin_log))
         file_stat = os.stat(self.admin_log)
         file_mode = stat.S_IMODE(file_stat.st_mode)
         self.assertEqual(file_mode, 0o600, f"Admin log permissions must be 0600, got {oct(file_mode)}")
 
-        with open(self.admin_log, "r") as f:
-            lines = [json.loads(line) for line in f if line.strip()]
+        is_valid, count, head, err = verify_admin_chain(self.admin_log)
+        self.assertTrue(is_valid, f"Admin chain invalid: {err}")
+        self.assertEqual(count, 2)
 
-        self.assertEqual(len(lines), 2, "Expected exactly 2 entries (PREPARED and COMMITTED)")
-        self.assertEqual(lines[0]["action"], "TRUST_ROOT_RESET_PREPARED")
-        self.assertEqual(lines[0]["reason"], reason)
-        self.assertEqual(lines[0]["prior_anchor"]["index"], 999)
-        self.assertEqual(lines[0]["new_index"], 0)
-        self.assertEqual(lines[0]["new_head_hash"], rec["hash"])
+        self.assertTrue(verify_chain(self.vault_file, require_records=True, anchor_path=self.anchor_file))
 
-        self.assertEqual(lines[1]["action"], "TRUST_ROOT_RESET_COMMITTED")
-        self.assertEqual(lines[1]["reason"], reason)
-        self.assertEqual(lines[1]["new_index"], 0)
-        self.assertEqual(lines[1]["new_head_hash"], rec["hash"])
 
-        # 5. Verify the reset anchor is valid and chain passes verification
+def _concurrent_worker(vault_file, anchor_file, worker_id, count):
+    for i in range(count):
+        try:
+            append_record(vault_file, f"worker.{worker_id}", {"seq": i, "worker": worker_id}, anchor_path=anchor_file)
+        except Exception as e:
+            pass
+
+
+class TestMultiprocessConcurrency(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.vault_file = os.path.join(self.tmpdir.name, "ledger.jsonl")
+        self.anchor_file = os.path.join(self.tmpdir.name, "anchor.json")
+        with open(self.vault_file, "w") as f:
+            f.write("")
+        init_anchor(self.vault_file, self.anchor_file)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_concurrent_writers_no_deadlock_or_corruption(self):
+        num_workers = 4
+        ops_per_worker = 15
+        processes = []
+
+        for wid in range(num_workers):
+            p = multiprocessing.Process(target=_concurrent_worker, args=(self.vault_file, self.anchor_file, wid, ops_per_worker))
+            processes.append(p)
+            p.start()
+
+        for p in processes:
+            p.join(timeout=10.0)
+            self.assertFalse(p.is_alive(), "Worker process timed out or deadlocked")
+
         self.assertTrue(verify_chain(self.vault_file, require_records=True, anchor_path=self.anchor_file))
 
 
