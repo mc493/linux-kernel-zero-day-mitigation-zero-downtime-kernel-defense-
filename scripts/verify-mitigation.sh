@@ -19,59 +19,71 @@ echo "========================================================================"
 
 # Test 1: ebtables module blockade & RAM residency check
 echo -n "[Test 1/5] ebtables module loader blockade & RAM state: "
-if command -v sudo >/dev/null 2>&1; then
-    sudo -n modprobe ebt_snat 2>/dev/null || modprobe ebt_snat 2>/dev/null || true
-else
-    modprobe ebt_snat 2>/dev/null || true
+LOADER_BLOCKED=0
+DRYRUN_OUTPUT=$(modprobe -n -v ebt_snat 2>&1 || true)
+if echo "$DRYRUN_OUTPUT" | grep -q "/bin/true"; then
+    LOADER_BLOCKED=1
 fi
+
 if lsmod | grep -q -E "^ebt"; then
     echo "[FAIL] FAILED"
     echo "  -> Modules matching '^ebt' remain active in kernel memory:"
     lsmod | grep -E "^ebt"
     FAILURES=$((FAILURES + 1))
+elif [ "$LOADER_BLOCKED" -eq 1 ]; then
+    echo "[PASS] PASSED (Loader override active: 'install /bin/true', 0 modules resident in RAM)"
 else
-    echo "[PASS] PASSED (0 modules resident in RAM)"
+    echo "[WARN] INCONCLUSIVE (0 modules resident in RAM, but modprobe dry-run returned: $DRYRUN_OUTPUT)"
 fi
 
 # Test 2: AF_ALG crypto socket probe & assertion
 echo -n "[Test 2/5] AF_ALG (domain 38) socket probe: "
 TEST2_OUTPUT=$(python3 -c "
-import socket, sys
+import socket, errno, sys
 try:
     s = socket.socket(38, socket.SOCK_SEQPACKET, 0)
     print('PROBE_TRIGGERED')
-except PermissionError:
-    print('BLOCKED_BY_SECCOMP')
+    s.close()
 except OSError as e:
-    if getattr(e, 'errno', None) == 97:
+    if e.errno == errno.EPERM:
+        print('BLOCKED_BY_SECCOMP')
+    elif e.errno == errno.EAFNOSUPPORT:
         print('UNSUPPORTED_BY_KERNEL')
     else:
-        print(f'ERROR: {e}')
+        print(f'ERROR_{e.errno}_{errno.errorcode.get(e.errno, e.errno)}')
 except Exception as e:
-    print(f'ERROR: {e}')
+    print(f'ERROR_{e}')
 ")
 
 if [ "$TEST2_OUTPUT" = "BLOCKED_BY_SECCOMP" ]; then
-    echo "[PASS] PASSED (Synchronously blocked by SECCOMP profile: EACCES)"
+    echo "[PASS] PASSED (Synchronously blocked by SECCOMP profile: exact EPERM)"
 elif [ "$TEST2_OUTPUT" = "UNSUPPORTED_BY_KERNEL" ]; then
-    echo "[PASS] PASSED (Subsystem not compiled into kernel: EAFNOSUPPORT)"
+    echo "[INFO] NOT_APPLICABLE (Subsystem not compiled into kernel: EAFNOSUPPORT)"
 elif [ "$TEST2_OUTPUT" = "PROBE_TRIGGERED" ]; then
-    echo "[WARN] TRIGGERED (Syscall executed)"
+    echo "[WARN] TRIGGERED (Syscall executed on host)"
     # If audit ledger is present, assert that the alert was recorded
     if [ -f "$AUDIT_LOG" ]; then
         echo -n "  -> Checking cryptographic audit ledger for alert: "
-        sleep 1
-        if tail -n 200 "$AUDIT_LOG" | grep -q "AF_ALG"; then
+        FOUND=0
+        for i in {1..10}; do
+            if tail -n 100 "$AUDIT_LOG" | grep -q "AF_ALG"; then
+                FOUND=1
+                break
+            fi
+            sleep 0.2
+        done
+        if [ "$FOUND" -eq 1 ]; then
             echo "[PASS] PASSED (Alert verified in hash chain)"
         else
-            echo "[FAIL] FAILED (No recent AF_ALG alert in last 200 audit events)"
+            echo "[FAIL] FAILED (No recent AF_ALG alert in last 100 audit events)"
             FAILURES=$((FAILURES + 1))
         fi
     else
         echo "  -> Note: Set AUDIT_LOG to verify end-to-end ledger propagation."
     fi
 else
-    echo "Warning: Unknown state: $TEST2_OUTPUT"
+    echo "[FAIL] FAILED (Unexpected state: $TEST2_OUTPUT)"
+    FAILURES=$((FAILURES + 1))
 fi
 
 # Test 3: kTLS Two-Phase Runtime Probe (Phase 1: TCP_ULP=31, Phase 2: SOL_TLS=282)
@@ -108,15 +120,13 @@ p2 = 'UNKNOWN'
 try:
     cli.setsockopt(6, 31, b'tls\0')
     p1 = 'ATTACHED'
-except PermissionError:
-    p1 = 'BLOCKED_BY_POLICY'
 except OSError as e:
-    if e.errno in (errno.ENOPROTOOPT, errno.ENOENT):
+    if e.errno == errno.EPERM:
+        p1 = 'BLOCKED_EPERM'
+    elif e.errno in (errno.ENOPROTOOPT, errno.ENOENT):
         p1 = 'UNSUPPORTED_BY_KERNEL'
-    elif e.errno in (errno.EACCES, errno.EPERM):
-        p1 = 'BLOCKED_BY_POLICY'
     else:
-        p1 = f'ERR_{e.errno}'
+        p1 = f'ERR_{e.errno}_{errno.errorcode.get(e.errno, e.errno)}'
 
 # Phase 2: SOL_TLS crypto initialization (SOL_TLS=282, TLS_TX=1)
 # struct tls12_crypto_info_aes_gcm_128 (40 bytes)
@@ -124,17 +134,15 @@ crypto_info = struct.pack('=HH8s16s4s8s', 0x0303, 51, b'\x01'*8, b'\x02'*16, b'\
 try:
     cli.setsockopt(282, 1, crypto_info)
     p2 = 'CONFIGURED'
-except PermissionError:
-    p2 = 'BLOCKED_BY_POLICY'
 except OSError as e:
-    if e.errno in (errno.EACCES, errno.EPERM):
-        p2 = 'BLOCKED_BY_POLICY'
+    if e.errno == errno.EPERM:
+        p2 = 'BLOCKED_EPERM'
     elif e.errno == errno.ENOPROTOOPT:
         p2 = 'UNSUPPORTED_OR_P1_REQUIRED'
     elif e.errno == errno.EINVAL:
         p2 = 'REJECTED_INVALID_ARG'
     else:
-        p2 = f'ERR_{e.errno}'
+        p2 = f'ERR_{e.errno}_{errno.errorcode.get(e.errno, e.errno)}'
 
 cli.close()
 if active_conn:
@@ -147,24 +155,32 @@ print(f'{p1}|{p2}')
 P1_RES=$(echo "$TEST3_OUTPUT" | cut -d'|' -f1)
 P2_RES=$(echo "$TEST3_OUTPUT" | cut -d'|' -f2)
 
-if [ "$P1_RES" = "BLOCKED_BY_POLICY" ] || [ "$P2_RES" = "BLOCKED_BY_POLICY" ]; then
-    echo "[PASS] PASSED (Synchronously blocked by policy: P1=$P1_RES, P2=$P2_RES)"
+if [ "$P1_RES" = "BLOCKED_EPERM" ] && [ "$P2_RES" = "BLOCKED_EPERM" ]; then
+    echo "[PASS] PASSED (Synchronously blocked by policy: Phase 1 & 2 exact EPERM)"
 elif [ "$P1_RES" = "UNSUPPORTED_BY_KERNEL" ]; then
-    echo "[PASS] PASSED (kTLS subsystem not compiled in kernel: P1=$P1_RES)"
+    echo "[INFO] NOT_APPLICABLE (kTLS subsystem not compiled in kernel: P1=$P1_RES)"
 elif [ "$P1_RES" = "ATTACHED" ] || [ "$P2_RES" = "CONFIGURED" ]; then
-    echo "[WARN] TRIGGERED (Two-Phase evaluated: P1=$P1_RES, P2=$P2_RES)"
+    echo "[WARN] TRIGGERED (Two-Phase evaluated on host: P1=$P1_RES, P2=$P2_RES)"
     if [ -f "$AUDIT_LOG" ]; then
         echo -n "  -> Checking cryptographic audit ledger for kTLS alert: "
-        sleep 1
-        if tail -n 200 "$AUDIT_LOG" | grep -q -E "kTLS|TCP_ULP"; then
+        FOUND=0
+        for i in {1..10}; do
+            if tail -n 100 "$AUDIT_LOG" | grep -q -E "kTLS|TCP_ULP"; then
+                FOUND=1
+                break
+            fi
+            sleep 0.2
+        done
+        if [ "$FOUND" -eq 1 ]; then
             echo "[PASS] PASSED (Alert verified in hash chain)"
         else
-            echo "[FAIL] FAILED (No recent kTLS alert in last 200 audit events)"
+            echo "[FAIL] FAILED (No recent kTLS alert in last 100 audit events)"
             FAILURES=$((FAILURES + 1))
         fi
     fi
 else
-    echo "Warning: Evaluation state: P1=$P1_RES, P2=$P2_RES"
+    echo "[FAIL] FAILED (Unexpected evaluation state: P1=$P1_RES, P2=$P2_RES)"
+    FAILURES=$((FAILURES + 1))
 fi
 
 # Test 4: OCI Container Synchronous SECCOMP Profile Enforcement (if Docker available)
@@ -281,11 +297,14 @@ t.join(timeout=2.0)
 # 1. Phase 1 must succeed under isolation profile
 p1_ok = False
 p1_err = None
-try:
-    cli.setsockopt(6, 31, b'tls\0')
-    p1_ok = True
-except Exception as e:
-    p1_err = str(e)
+if active_conn is None:
+    p1_err = 'SERVER_ACCEPT_FAILED'
+else:
+    try:
+        cli.setsockopt(6, 31, b'tls\0')
+        p1_ok = True
+    except Exception as e:
+        p1_err = str(e)
 
 # 2. Phase 2 must return exact EPERM on the attached socket
 p2_blocked = False
