@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # verify-mitigation.sh
-# Automated Zero-Day Compensating Control Verification & CI Gating Suite (v1.3.4)
+# Automated Zero-Day Compensating Control Verification & CI Gating Suite (v1.3.5)
 # Returns exit code 0 on full compliance, >0 on any failure or strict violation.
 # ==============================================================================
 set -u
@@ -41,7 +41,7 @@ AUDIT_LOG="${AUDIT_LOG:-$DEFAULT_AUDIT_LOG}"
 AUDIT_ANCHOR="${AUDIT_ANCHOR:-${AUDIT_LOG}.anchor.json}"
 
 echo "========================================================================"
-echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE (v1.3.4)"
+echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE (v1.3.5)"
 echo "Run Identifier: $RUN_ID"
 if [ "$STRICT_MODE" -eq 1 ]; then
     echo "Mode: STRICT (Zero-tolerance CI gating active; preflight abort on error)"
@@ -654,17 +654,28 @@ else:
 
         SECCOMP_OUTPUT=$(cat "$CONTAINER_OUT")
         if [ "$DOCKER_STATUS" -eq 0 ] && [ "$SECCOMP_OUTPUT" = "ALL_BLOCKED_BY_SECCOMP_FILTER" ]; then
-            CONTRAST_P1="PROVEN"
-            CONTRAST_P2="PROVEN"
+            CONTRAST_P1="INCONCLUSIVE"
+            CONTRAST_P2="INCONCLUSIVE"
             CONTRAST_AF="INCONCLUSIVE"
-            if [ "$BASELINE_AF" = "PERMITTED" ]; then
-                CONTRAST_AF="PROVEN"
-            fi
+
+            [ "$BASELINE_P1" = "ATTACHED" ] && CONTRAST_P1="PROVEN"
+            [ "$BASELINE_P2" = "CONFIGURED" ] && CONTRAST_P2="PROVEN"
+            [ "$BASELINE_AF" = "PERMITTED" ] && CONTRAST_AF="PROVEN"
 
             echo "[PASS] PASSED (AF_ALG, TCP_ULP, SOL_TLS synchronously rejected by SECCOMP: exact EPERM, Seccomp mode=2 verified)"
             echo "  -> Baseline Contrast Breakdown (Per-Vector Causal Attribution):"
-            echo "     * Phase 1 (TCP_ULP): $CONTRAST_P1 (Unconfined=$BASELINE_P1 -> Hardened=BLOCKED_EPERM_SECCOMP_2)"
-            echo "     * Phase 2 (SOL_TLS): $CONTRAST_P2 (Unconfined=$BASELINE_P2 -> Hardened=BLOCKED_EPERM_SECCOMP_2)"
+            if [ "$CONTRAST_P1" = "PROVEN" ]; then
+                echo "     * Phase 1 (TCP_ULP): PROVEN (Unconfined=$BASELINE_P1 -> Hardened=BLOCKED_EPERM_SECCOMP_2)"
+            else
+                echo "     * Phase 1 (TCP_ULP): INCONCLUSIVE for causal contrast (Unconfined baseline: $BASELINE_P1; SECCOMP filter independently verified)"
+            fi
+
+            if [ "$CONTRAST_P2" = "PROVEN" ]; then
+                echo "     * Phase 2 (SOL_TLS): PROVEN (Unconfined=$BASELINE_P2 -> Hardened=BLOCKED_EPERM_SECCOMP_2)"
+            else
+                echo "     * Phase 2 (SOL_TLS): INCONCLUSIVE for causal contrast (Unconfined baseline: $BASELINE_P2; SECCOMP filter independently verified)"
+            fi
+
             if [ "$CONTRAST_AF" = "PROVEN" ]; then
                 echo "     * AF_ALG (domain 38): PROVEN (Unconfined=$BASELINE_AF -> Hardened=BLOCKED_EPERM_SECCOMP_2)"
             else

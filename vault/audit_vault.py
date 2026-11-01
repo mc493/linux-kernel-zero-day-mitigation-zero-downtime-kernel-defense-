@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Cryptographically Tamper-Evident Audit Vault (v1.3.4)
+Cryptographically Tamper-Evident Audit Vault (v1.3.5)
 Appends events to a sequential SHA-256 cryptographic hash-chain ledger
 with canonical JSON hashing (versioned, zero delimiter ambiguity, strict key whitelisting,
-recursive duplicate key rejection, recursive string-key dictionary validation,
+recursive duplicate key rejection, bounded-depth recursive string-key dictionary validation,
 and bounded epoch timestamps),
 unified reader-writer advisory locking across ledger and external trust anchor,
 fail-closed append-time anchor parity gating with rigorous interrupted-commit verification,
 mandatory documented justifications for forced trust-root resets,
-and durable directory fsync with independent administrative audit logging.
+canonical path collision immunity, dedicated advisory locking with restrictive permissions (0600),
+and two-phase administrative reset transactions (PREPARED -> COMMITTED) with directory fsync.
 
 Each record commits to:
   Hash_n = SHA-256(canonical_json({"version": 1, "index": n, "timestamp": ts, "topic": t, "data": payload, "prev_hash": h_{n-1}}))
@@ -16,7 +17,7 @@ Each record commits to:
 Usage:
   python3 audit_vault.py --verify [--vault-file path/to/audit_chain.jsonl] [--require-records] [--anchor-file path]
   python3 audit_vault.py --append '{"event": "probe", "severity": "WARNING"}' [--topic security.alerts.kernel] [--anchor-file path]
-  python3 audit_vault.py --init-anchor [--vault-file path/to/audit_chain.jsonl] --anchor-file path [--force --reason "text"]
+  python3 audit_vault.py --init-anchor [--vault-file path/to/audit_chain.jsonl] --anchor-file path [--force --reason "text"] [--admin-log path]
 """
 
 import sys
@@ -46,8 +47,13 @@ def rejecting_duplicates_object_pairs_hook(pairs: list[tuple[str, any]]) -> dict
     return res
 
 
-def validate_dict_keys_are_strings(obj: any, path: str = "data") -> None:
-    """Recursively validates that all dictionary keys are strictly strings, preventing implicit coercion or duplicates."""
+def validate_dict_keys_are_strings(obj: any, path: str = "data", depth: int = 0, max_depth: int = 32) -> None:
+    """
+    Recursively validates that all dictionary keys are strictly strings, preventing implicit coercion or duplicates.
+    Enforces a maximum nesting depth to eliminate uncaught RecursionError on hostile or cyclical inputs.
+    """
+    if depth > max_depth:
+        raise ValueError(f"Field '{path}' exceeds maximum allowable nesting depth of {max_depth}")
     if isinstance(obj, dict):
         seen_keys = set()
         for k, v in obj.items():
@@ -56,10 +62,10 @@ def validate_dict_keys_are_strings(obj: any, path: str = "data") -> None:
             if k in seen_keys:
                 raise ValueError(f"Field '{path}' contains duplicate key: {k!r}")
             seen_keys.add(k)
-            validate_dict_keys_are_strings(v, f"{path}.{k}")
+            validate_dict_keys_are_strings(v, f"{path}.{k}", depth=depth + 1, max_depth=max_depth)
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
-            validate_dict_keys_are_strings(item, f"{path}[{i}]")
+            validate_dict_keys_are_strings(item, f"{path}[{i}]", depth=depth + 1, max_depth=max_depth)
 
 
 def compute_record_hash(index: int, timestamp: float, topic: str, data: dict, prev_hash: str, version: int = RECORD_VERSION) -> str:
@@ -156,6 +162,8 @@ def validate_anchor_schema(anchor_data: dict, anchor_path: str) -> None:
     idx = anchor_data.get("index")
     if not isinstance(idx, int) or isinstance(idx, bool):
         raise ValueError(f"Anchor {anchor_path}: 'index' must be a valid integer, got {type(idx).__name__}")
+    if idx < -1:
+        raise ValueError(f"Anchor {anchor_path}: 'index' cannot be less than -1, got {idx}")
 
     ts = anchor_data.get("timestamp")
     if not isinstance(ts, (int, float)) or isinstance(ts, bool):
@@ -171,6 +179,8 @@ def validate_anchor_schema(anchor_data: dict, anchor_path: str) -> None:
     head = anchor_data.get("head_hash")
     if not isinstance(head, str) or len(head) != 64 or not all(c in "0123456789abcdefABCDEF" for c in head):
         raise ValueError(f"Anchor {anchor_path}: 'head_hash' must be a 64-character hexadecimal SHA-256 digest")
+    if idx == -1 and head.lower() != GENESIS_HASH:
+        raise ValueError(f"Anchor {anchor_path}: Uninitialized anchor (index -1) must have genesis head hash ({GENESIS_HASH}), got {head}")
 
 
 def _verify_chain_stream_unlocked(vault_path: str) -> tuple[bool, int, str, str, str]:
@@ -268,6 +278,9 @@ def append_record(vault_path: str, topic: str, data: dict, anchor_path: str | No
         json.dumps(data, sort_keys=True, allow_nan=False, separators=(',', ':'))
     except (ValueError, TypeError) as e:
         raise ValueError(f"Field 'data' failed strict JSON serialization: {e}")
+
+    if anchor_path and _is_path_collision(anchor_path, vault_path):
+        raise ValueError(f"Invalid configuration: external trust anchor collides with ledger vault file: '{anchor_path}' -> '{vault_path}'")
 
     vault_dir = os.path.dirname(os.path.abspath(vault_path))
     os.makedirs(vault_dir, exist_ok=True)
@@ -420,15 +433,87 @@ def verify_chain(vault_path: str, require_records: bool = False, anchor_path: st
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _is_path_collision(path_a: str, path_b: str) -> bool:
+    """Checks whether two paths resolve to the same canonical filesystem location or inode."""
+    norm_a = os.path.realpath(os.path.abspath(path_a))
+    norm_b = os.path.realpath(os.path.abspath(path_b))
+    if norm_a == norm_b:
+        return True
+    try:
+        if os.path.exists(path_a) and os.path.exists(path_b):
+            return os.path.samefile(path_a, path_b)
+    except OSError:
+        pass
+    return False
+
+
+def _append_admin_event(admin_log: str, event: dict) -> None:
+    """
+    Appends an administrative audit event under an exclusive advisory lock with
+    restrictive file permissions (0600) and durable fsync across both file and parent directory.
+    """
+    admin_dir = os.path.dirname(os.path.abspath(admin_log))
+    os.makedirs(admin_dir, exist_ok=True)
+    admin_lock_path = os.path.join(admin_dir, f".{os.path.basename(admin_log)}.lock")
+
+    serialized = json.dumps(event, sort_keys=True, allow_nan=False, separators=(',', ':')) + "\n"
+    encoded = serialized.encode("utf-8")
+
+    with open(admin_lock_path, "a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            is_new = not os.path.exists(admin_log)
+            fd = os.open(admin_log, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            try:
+                os.chmod(admin_log, 0o600)
+                written = 0
+                while written < len(encoded):
+                    n = os.write(fd, encoded[written:])
+                    if n == 0:
+                        raise OSError("Zero bytes written to admin log")
+                    written += n
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+            if is_new:
+                dir_fd = os.open(admin_dir, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def init_anchor(vault_path: str, anchor_path: str, force: bool = False, reason: str | None = None, admin_audit_log: str | None = None) -> bool:
     """
     Explicitly bootstraps or resets the external trust anchor from a verified existing ledger.
     Holds exclusive lock (LOCK_EX) throughout verification and anchor writing.
-    Requires non-empty --reason when resetting with --force, persisting to an independent administrative log.
+    Requires non-empty --reason when resetting with --force, executing a two-phase administrative
+    transaction (PREPARED -> COMMITTED) with restrictive permissions (0600) into an independent,
+    collision-protected administrative audit log.
     """
     if reason and not force:
         print("[FAIL] Invalid arguments: --reason is only permitted when resetting an existing trust root with --force.")
         return False
+
+    if _is_path_collision(anchor_path, vault_path):
+        print(f"[FAIL] Invalid configuration: anchor path collides with ledger vault file: {anchor_path}")
+        return False
+
+    admin_log = admin_audit_log or os.getenv("AUDIT_VAULT_ADMIN_LOG")
+    if not admin_log:
+        anchor_dir = os.path.dirname(os.path.abspath(anchor_path))
+        admin_log = os.path.join(anchor_dir, ".audit_vault_admin.log")
+
+    if force and os.path.exists(anchor_path):
+        if _is_path_collision(admin_log, vault_path):
+            print(f"[FAIL] Invalid configuration: administrative audit log collides with ledger vault file: {admin_log}")
+            return False
+        if _is_path_collision(admin_log, anchor_path):
+            print(f"[FAIL] Invalid configuration: administrative audit log collides with trust anchor file: {admin_log}")
+            return False
 
     vault_dir = os.path.dirname(os.path.abspath(vault_path))
     lock_path = os.path.join(vault_dir, f".{os.path.basename(vault_path)}.lock")
@@ -452,9 +537,12 @@ def init_anchor(vault_path: str, anchor_path: str, force: bool = False, reason: 
 
                 try:
                     with open(anchor_path, "r", encoding="utf-8") as af:
-                        prior_anchor_data = json.load(af, object_pairs_hook=rejecting_duplicates_object_pairs_hook)
-                except Exception:
-                    prior_anchor_data = {"error": "unparseable"}
+                        raw_anchor = af.read()
+                    prior_anchor_data = json.loads(raw_anchor, object_pairs_hook=rejecting_duplicates_object_pairs_hook)
+                    # Pre-validate serializability to prevent mid-transaction serialization failures
+                    json.dumps(prior_anchor_data, allow_nan=False)
+                except Exception as e:
+                    prior_anchor_data = {"error": f"unparseable_or_invalid: {e}"}
 
             is_valid, count, head_hash, _penult, err = _verify_chain_stream_unlocked(vault_path)
             if not is_valid:
@@ -463,17 +551,12 @@ def init_anchor(vault_path: str, anchor_path: str, force: bool = False, reason: 
 
             last_idx = count - 1 if count > 0 else -1
             ts = time.time()
-            durable_write_anchor(anchor_path, last_idx, ts, head_hash)
+            is_forced_reset = force and (prior_anchor_data is not None)
 
-            # Persist forced reset to an independent administrative audit log
-            if force and prior_anchor_data is not None:
-                admin_log = admin_audit_log or os.getenv("AUDIT_VAULT_ADMIN_LOG")
-                if not admin_log:
-                    anchor_dir = os.path.dirname(os.path.abspath(anchor_path))
-                    admin_log = os.path.join(anchor_dir, ".audit_vault_admin.log")
-
-                admin_entry = {
-                    "action": "TRUST_ROOT_RESET",
+            # Phase 1: PREPARED intent logged and fsynced BEFORE touching anchor on disk
+            if is_forced_reset:
+                admin_prepared = {
+                    "action": "TRUST_ROOT_RESET_PREPARED",
                     "anchor_path": os.path.abspath(anchor_path),
                     "new_head_hash": head_hash,
                     "new_index": last_idx,
@@ -485,15 +568,60 @@ def init_anchor(vault_path: str, anchor_path: str, force: bool = False, reason: 
                     "vault_path": os.path.abspath(vault_path),
                     "version": RECORD_VERSION
                 }
-                admin_line = json.dumps(admin_entry, sort_keys=True, allow_nan=False, separators=(',', ':')) + "\n"
-                with open(admin_log, "a", encoding="utf-8") as alf:
-                    alf.write(admin_line)
-                    alf.flush()
-                    os.fsync(alf.fileno())
+                try:
+                    _append_admin_event(admin_log, admin_prepared)
+                except Exception as e:
+                    print(f"[FAIL] Failed to write administrative PREPARED intent to {admin_log}: {e}. Trust root reset aborted.")
+                    return False
+
+            # Phase 2: Atomic anchor replacement on disk
+            try:
+                durable_write_anchor(anchor_path, last_idx, ts, head_hash)
+            except Exception as e:
+                if is_forced_reset:
+                    admin_failed = {
+                        "action": "TRUST_ROOT_RESET_FAILED",
+                        "anchor_path": os.path.abspath(anchor_path),
+                        "error": str(e),
+                        "new_head_hash": head_hash,
+                        "new_index": last_idx,
+                        "operator_pid": os.getpid(),
+                        "operator_uid": os.getuid() if hasattr(os, "getuid") else None,
+                        "reason": reason.strip(),
+                        "timestamp": time.time(),
+                        "vault_path": os.path.abspath(vault_path),
+                        "version": RECORD_VERSION
+                    }
+                    try:
+                        _append_admin_event(admin_log, admin_failed)
+                    except Exception:
+                        pass
+                print(f"[FAIL] Failed to durably write anchor to {anchor_path}: {e}")
+                return False
+
+            # Phase 3: COMMITTED event logged and fsynced after durable anchor replacement
+            if is_forced_reset:
+                admin_committed = {
+                    "action": "TRUST_ROOT_RESET_COMMITTED",
+                    "anchor_path": os.path.abspath(anchor_path),
+                    "new_head_hash": head_hash,
+                    "new_index": last_idx,
+                    "operator_pid": os.getpid(),
+                    "operator_uid": os.getuid() if hasattr(os, "getuid") else None,
+                    "prior_anchor": prior_anchor_data,
+                    "reason": reason.strip(),
+                    "timestamp": time.time(),
+                    "vault_path": os.path.abspath(vault_path),
+                    "version": RECORD_VERSION
+                }
+                try:
+                    _append_admin_event(admin_log, admin_committed)
+                except Exception as e:
+                    print(f"[WARN] ⚠️ TRUST ROOT RESET: Anchor was replaced, but COMMITTED event logging failed: {e}")
 
                 print(f"[WARN] ⚠️ TRUST ROOT RESET: Overwriting existing trust anchor at {anchor_path} (--force used).")
                 print(f"       Operator Reason: {reason.strip()}")
-                print(f"       Administrative Audit Logged: {admin_log}")
+                print(f"       Administrative Audit Logged (Two-Phase PREPARED & COMMITTED): {admin_log}")
 
             print(f"[OK] Trust anchor successfully initialized for ledger with {count} records:")
             print(f"   Anchor Path: {anchor_path}")
@@ -506,7 +634,7 @@ def init_anchor(vault_path: str, anchor_path: str, force: bool = False, reason: 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Cryptographically Tamper-Evident Audit Vault (v1.3.4)")
+    parser = argparse.ArgumentParser(description="Cryptographically Tamper-Evident Audit Vault (v1.3.5)")
     parser.add_argument("--vault-file", default=DEFAULT_VAULT_FILE, help="Path to audit_chain.jsonl")
     parser.add_argument("--verify", action="store_true", help="Verify chain integrity")
     parser.add_argument("--require-records", action="store_true", help="Reject empty ledgers during verification")
@@ -514,6 +642,7 @@ def main():
     parser.add_argument("--init-anchor", action="store_true", help="Explicitly bootstrap trust anchor from verified ledger")
     parser.add_argument("--force", action="store_true", help="Force overwrite existing anchor during --init-anchor")
     parser.add_argument("--reason", help="Mandatory documented reason for anchor reset when using --force")
+    parser.add_argument("--admin-log", help="Path to administrative audit log file")
     parser.add_argument("--append", help="JSON data payload to append")
     parser.add_argument("--topic", default="security.alerts.kernel", help="Event topic")
 
@@ -523,7 +652,7 @@ def main():
         if not args.anchor_file:
             print("Error: --init-anchor requires --anchor-file path")
             sys.exit(1)
-        success = init_anchor(args.vault_file, args.anchor_file, force=args.force, reason=args.reason)
+        success = init_anchor(args.vault_file, args.anchor_file, force=args.force, reason=args.reason, admin_audit_log=args.admin_log)
         sys.exit(0 if success else 1)
     elif args.verify:
         success = verify_chain(args.vault_file, require_records=args.require_records, anchor_path=args.anchor_file)
