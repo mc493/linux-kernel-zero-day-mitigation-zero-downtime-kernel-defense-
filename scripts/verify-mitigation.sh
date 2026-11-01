@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # verify-mitigation.sh
-# Automated Zero-Day Compensating Control Verification & CI Gating Suite (v1.3.1)
+# Automated Zero-Day Compensating Control Verification & CI Gating Suite (v1.3.2)
 # Returns exit code 0 on full compliance, >0 on any failure or strict violation.
 # ==============================================================================
 set -u
@@ -9,12 +9,14 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-PASSED_COUNT=0
+PREVENTION_PASSED=0
+DETECTION_PASSED=0
 FAILED_COUNT=0
 INCONCLUSIVE_COUNT=0
 
 STRICT_MODE="${STRICT_MODE:-0}"
 RUN_ID="${RUN_ID:-verify-run-$(date +%s%N)-$$-${RANDOM}}"
+export RUN_ID
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-python:3.11-alpine@sha256:09d17d5e4c16d0a7a1eea690bcb7c6ab8616b211f8421e429e97c1bef5bd0ed2}"
 
 for arg in "$@"; do
@@ -24,8 +26,8 @@ for arg in "$@"; do
             ;;
         -h|--help)
             echo "Usage: $0 [--strict]"
-            echo "  --strict  Enforces zero-tolerance CI gating (immediate preflight abort on missing/corrupt ledger,"
-            echo "            and hard failure on any missing prerequisite, unverified attribution, or skipped test)"
+            echo "  --strict  Enforces zero-tolerance CI gating (immediate preflight abort on missing/corrupt ledger"
+            echo "            or external trust anchor, and hard failure on any baseline error, unverified nonce, or skipped test)"
             exit 0
             ;;
     esac
@@ -39,7 +41,7 @@ AUDIT_LOG="${AUDIT_LOG:-$DEFAULT_AUDIT_LOG}"
 AUDIT_ANCHOR="${AUDIT_ANCHOR:-${AUDIT_LOG}.anchor.json}"
 
 echo "========================================================================"
-echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE (v1.3.1)"
+echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE (v1.3.2)"
 echo "Run Identifier: $RUN_ID"
 if [ "$STRICT_MODE" -eq 1 ]; then
     echo "Mode: STRICT (Zero-tolerance CI gating active; preflight abort on error)"
@@ -55,18 +57,19 @@ if [ "$STRICT_MODE" -eq 1 ]; then
         echo "[ABORT] FAILED (Strict mode requires active AUDIT_LOG ledger: $AUDIT_LOG)"
         exit 1
     fi
+    if [ ! -f "$AUDIT_ANCHOR" ]; then
+        echo "[ABORT] FAILED (Strict mode requires active external trust anchor: $AUDIT_ANCHOR)"
+        exit 1
+    fi
 
     if [ -f "${REPO_ROOT}/vault/audit_vault.py" ]; then
-        ANCHOR_ARG=""
-        if [ -f "$AUDIT_ANCHOR" ]; then
-            ANCHOR_ARG="--anchor-file $AUDIT_ANCHOR"
-        fi
-        PREFLIGHT_VERIFY=$(python3 "${REPO_ROOT}/vault/audit_vault.py" --verify --vault-file "$AUDIT_LOG" --require-records $ANCHOR_ARG 2>&1)
+        VERIFY_ARGS=(--verify --vault-file "$AUDIT_LOG" --require-records --anchor-file "$AUDIT_ANCHOR")
+        PREFLIGHT_VERIFY=$(python3 "${REPO_ROOT}/vault/audit_vault.py" "${VERIFY_ARGS[@]}" 2>&1)
         if [ $? -ne 0 ]; then
             echo "[ABORT] FAILED (Audit ledger failed cryptographic verification: $PREFLIGHT_VERIFY)"
             exit 1
         fi
-        echo "[PASS] PASSED (Audit ledger structurally and cryptographically intact)"
+        echo "[PASS] PASSED (Audit ledger and external trust anchor structurally and cryptographically intact)"
     else
         echo "[ABORT] FAILED (Audit vault verifier missing at ${REPO_ROOT}/vault/audit_vault.py)"
         exit 1
@@ -104,7 +107,7 @@ else
     elif [ "$LOADER_BLOCKED" -eq 1 ]; then
         echo "[PASS] PASSED (Loader override active: '$EFFECTIVE_CMD', exit=0, 0 ebtables modules in RAM)"
         echo "  -> Note: Verifies modprobe user-space loader path; does not intercept direct finit_module(2) syscalls without Seccomp/LSM."
-        PASSED_COUNT=$((PASSED_COUNT + 1))
+        PREVENTION_PASSED=$((PREVENTION_PASSED + 1))
     elif [ "$LOADER_BLOCKED" -eq 2 ]; then
         echo "[INFO] NOT_APPLICABLE (Kernel tree omits ebt_snat module: 0 modules in RAM)"
         INCONCLUSIVE_COUNT=$((INCONCLUSIVE_COUNT + 1))
@@ -123,9 +126,10 @@ fi
 echo -n "[Test 2/5] AF_ALG (domain 38) socket probe: "
 PRE_TS_2=$(python3 -c "import time; print(time.time())")
 
-TEST2_OUTPUT=$(python3 -c "
-import socket, errno, sys
+TEST2_OUTPUT=$(RUN_ID="$RUN_ID" python3 -c "
+import socket, errno, sys, os
 
+run_id = os.environ.get('RUN_ID', sys.argv[1] if len(sys.argv) > 1 else '')
 seccomp_mode = 'unknown'
 try:
     with open('/proc/self/status') as f:
@@ -137,7 +141,7 @@ except Exception:
 
 try:
     s = socket.socket(38, socket.SOCK_SEQPACKET, 0)
-    print(f'PROBE_TRIGGERED|seccomp={seccomp_mode}')
+    print(f'PROBE_TRIGGERED|seccomp={seccomp_mode}|run_id={run_id}')
     s.close()
 except OSError as e:
     if e.errno == errno.EPERM:
@@ -153,16 +157,16 @@ except OSError as e:
         print(f'ERROR_{e.errno}_{errno.errorcode.get(e.errno, e.errno)}')
 except Exception as e:
     print(f'ERROR_{e}')
-")
+" "$RUN_ID")
 
 TEST2_STATUS=$(echo "$TEST2_OUTPUT" | cut -d'|' -f1)
 
 if [ "$TEST2_STATUS" = "BLOCKED_BY_SECCOMP_FILTER" ]; then
     echo "[PASS] PASSED (Synchronous denial observed with active SECCOMP filter: exact EPERM, Seccomp mode=2 verified)"
-    PASSED_COUNT=$((PASSED_COUNT + 1))
+    PREVENTION_PASSED=$((PREVENTION_PASSED + 1))
 elif [ "$TEST2_STATUS" = "BLOCKED_BY_HOST_POLICY" ]; then
     echo "[PASS] PASSED (Synchronous denial observed under host policy: exact EPERM, Seccomp mode=0 verified)"
-    PASSED_COUNT=$((PASSED_COUNT + 1))
+    PREVENTION_PASSED=$((PREVENTION_PASSED + 1))
 elif [[ "$TEST2_STATUS" =~ ^BLOCKED_EPERM_SECCOMP_ ]]; then
     if [ "$STRICT_MODE" -eq 1 ]; then
         echo "[FAIL] FAILED (Strict mode: EPERM observed but Seccomp mode was unverified: $TEST2_STATUS)"
@@ -176,6 +180,12 @@ elif [ "$TEST2_STATUS" = "UNSUPPORTED_BY_RUNTIME" ]; then
     INCONCLUSIVE_COUNT=$((INCONCLUSIVE_COUNT + 1))
 elif [ "$TEST2_STATUS" = "PROBE_TRIGGERED" ]; then
     echo "[WARN] TRIGGERED (Syscall executed on host)"
+    if [ "${AUDIT_PRODUCER_EMIT:-0}" -eq 1 ] && [ -f "${REPO_ROOT}/vault/audit_vault.py" ] && [ -f "$AUDIT_LOG" ]; then
+        python3 "${REPO_ROOT}/vault/audit_vault.py" --vault-file "$AUDIT_LOG" --append \
+            "{\"event\": \"probe\", \"rule\": \"AF_ALG probe executed\", \"run_id\": \"$RUN_ID\"}" \
+            --topic "security.alerts.kernel" ${AUDIT_ANCHOR:+--anchor-file "$AUDIT_ANCHOR"} >/dev/null 2>&1 || true
+    fi
+
     if [ -f "$AUDIT_LOG" ]; then
         echo -n "  -> Checking cryptographic audit ledger for correlated alert: "
         FOUND=0
@@ -222,14 +232,22 @@ else:
             sleep 0.2
         done
         if [ "$FOUND" -eq 1 ]; then
-            ANCHOR_ARG=""
+            ANCHOR_ARGS=()
             if [ -f "$AUDIT_ANCHOR" ]; then
-                ANCHOR_ARG="--anchor-file $AUDIT_ANCHOR"
+                ANCHOR_ARGS=(--anchor-file "$AUDIT_ANCHOR")
+            elif [ "$STRICT_MODE" -eq 1 ]; then
+                echo "[FAIL] FAILED (Strict mode requires external anchor file: $AUDIT_ANCHOR)"
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+                ANCHOR_ARGS=()
             fi
-            if [ -f "${REPO_ROOT}/vault/audit_vault.py" ] && python3 "${REPO_ROOT}/vault/audit_vault.py" --verify --vault-file "$AUDIT_LOG" $ANCHOR_ARG >/dev/null 2>&1; then
+            VERIFY_CMD=(python3 "${REPO_ROOT}/vault/audit_vault.py" --verify --vault-file "$AUDIT_LOG")
+            if [ ${#ANCHOR_ARGS[@]} -gt 0 ]; then
+                VERIFY_CMD+=("${ANCHOR_ARGS[@]}")
+            fi
+            if [ -f "${REPO_ROOT}/vault/audit_vault.py" ] && "${VERIFY_CMD[@]}" >/dev/null 2>&1; then
                 if [ "$MATCH_TYPE" = "EXACT_RUN_MATCH" ]; then
                     echo "[PASS] PASSED (Exact RUN_ID correlated alert verified with unbroken SHA-256 hash chain)"
-                    PASSED_COUNT=$((PASSED_COUNT + 1))
+                    DETECTION_PASSED=$((DETECTION_PASSED + 1))
                 else
                     if [ "$STRICT_MODE" -eq 1 ]; then
                         echo "[FAIL] FAILED (Strict mode requires exact RUN_ID correlation; only temporal match observed)"
@@ -265,9 +283,10 @@ fi
 echo -n "[Test 3/5] kTLS Two-Phase runtime probe (Phase 1: TCP_ULP=31, Phase 2: SOL_TLS=282): "
 PRE_TS_3=$(python3 -c "import time; print(time.time())")
 
-TEST3_OUTPUT=$(python3 -c "
-import socket, threading, struct, errno, sys
+TEST3_OUTPUT=$(RUN_ID="$RUN_ID" python3 -c "
+import socket, threading, struct, errno, sys, os
 
+run_id = os.environ.get('RUN_ID', sys.argv[1] if len(sys.argv) > 1 else '')
 seccomp_mode = 'unknown'
 try:
     with open('/proc/self/status') as f:
@@ -337,8 +356,8 @@ if active_conn:
     active_conn.close()
 srv.close()
 
-print(f'{p1}|{p2}|seccomp={seccomp_mode}')
-")
+print(f'{p1}|{p2}|seccomp={seccomp_mode}|run_id={run_id}')
+" "$RUN_ID")
 
 P1_RES=$(echo "$TEST3_OUTPUT" | cut -d'|' -f1)
 P2_RES=$(echo "$TEST3_OUTPUT" | cut -d'|' -f2)
@@ -347,10 +366,10 @@ SECCOMP_M3=$(echo "$TEST3_OUTPUT" | cut -d'|' -f3)
 if [ "$P1_RES" = "BLOCKED_EPERM" ] && [ "$P2_RES" = "BLOCKED_EPERM" ]; then
     if [ "$SECCOMP_M3" = "seccomp=2" ]; then
         echo "[PASS] PASSED (Synchronous denial observed with active SECCOMP filter: Phase 1 & 2 exact EPERM, Seccomp mode=2 verified)"
-        PASSED_COUNT=$((PASSED_COUNT + 1))
+        PREVENTION_PASSED=$((PREVENTION_PASSED + 1))
     elif [ "$SECCOMP_M3" = "seccomp=0" ]; then
         echo "[PASS] PASSED (Synchronous denial observed under host policy: Phase 1 & 2 exact EPERM, Seccomp mode=0 verified)"
-        PASSED_COUNT=$((PASSED_COUNT + 1))
+        PREVENTION_PASSED=$((PREVENTION_PASSED + 1))
     else
         if [ "$STRICT_MODE" -eq 1 ]; then
             echo "[FAIL] FAILED (Strict mode: Phase 1 & 2 blocked with EPERM, but Seccomp mode was unverified: $SECCOMP_M3)"
@@ -365,6 +384,12 @@ elif [ "$P1_RES" = "UNSUPPORTED_BY_RUNTIME" ]; then
     INCONCLUSIVE_COUNT=$((INCONCLUSIVE_COUNT + 1))
 elif [ "$P1_RES" = "ATTACHED" ] || [ "$P2_RES" = "CONFIGURED" ]; then
     echo "[WARN] TRIGGERED (Two-Phase evaluated on host: P1=$P1_RES, P2=$P2_RES)"
+    if [ "${AUDIT_PRODUCER_EMIT:-0}" -eq 1 ] && [ -f "${REPO_ROOT}/vault/audit_vault.py" ] && [ -f "$AUDIT_LOG" ]; then
+        python3 "${REPO_ROOT}/vault/audit_vault.py" --vault-file "$AUDIT_LOG" --append \
+            "{\"event\": \"probe\", \"rule\": \"kTLS Two-Phase runtime probe\", \"run_id\": \"$RUN_ID\"}" \
+            --topic "security.alerts.kernel" ${AUDIT_ANCHOR:+--anchor-file "$AUDIT_ANCHOR"} >/dev/null 2>&1 || true
+    fi
+
     if [ -f "$AUDIT_LOG" ]; then
         echo -n "  -> Checking cryptographic audit ledger for correlated kTLS alert: "
         FOUND=0
@@ -411,14 +436,22 @@ else:
             sleep 0.2
         done
         if [ "$FOUND" -eq 1 ]; then
-            ANCHOR_ARG=""
+            ANCHOR_ARGS=()
             if [ -f "$AUDIT_ANCHOR" ]; then
-                ANCHOR_ARG="--anchor-file $AUDIT_ANCHOR"
+                ANCHOR_ARGS=(--anchor-file "$AUDIT_ANCHOR")
+            elif [ "$STRICT_MODE" -eq 1 ]; then
+                echo "[FAIL] FAILED (Strict mode requires external anchor file: $AUDIT_ANCHOR)"
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+                ANCHOR_ARGS=()
             fi
-            if [ -f "${REPO_ROOT}/vault/audit_vault.py" ] && python3 "${REPO_ROOT}/vault/audit_vault.py" --verify --vault-file "$AUDIT_LOG" $ANCHOR_ARG >/dev/null 2>&1; then
+            VERIFY_CMD=(python3 "${REPO_ROOT}/vault/audit_vault.py" --verify --vault-file "$AUDIT_LOG")
+            if [ ${#ANCHOR_ARGS[@]} -gt 0 ]; then
+                VERIFY_CMD+=("${ANCHOR_ARGS[@]}")
+            fi
+            if [ -f "${REPO_ROOT}/vault/audit_vault.py" ] && "${VERIFY_CMD[@]}" >/dev/null 2>&1; then
                 if [ "$MATCH_TYPE" = "EXACT_RUN_MATCH" ]; then
                     echo "[PASS] PASSED (Exact RUN_ID correlated alert verified with unbroken SHA-256 hash chain)"
-                    PASSED_COUNT=$((PASSED_COUNT + 1))
+                    DETECTION_PASSED=$((DETECTION_PASSED + 1))
                 else
                     if [ "$STRICT_MODE" -eq 1 ]; then
                         echo "[FAIL] FAILED (Strict mode requires exact RUN_ID correlation; only temporal match observed)"
@@ -440,6 +473,9 @@ else:
         if [ "$STRICT_MODE" -eq 1 ]; then
             echo "[FAIL] FAILED (Strict mode: AUDIT_LOG must exist to verify host-level probe propagation)"
             FAILED_COUNT=$((FAILED_COUNT + 1))
+        else
+            echo "  -> Note: Set AUDIT_LOG to verify end-to-end ledger propagation."
+            INCONCLUSIVE_COUNT=$((INCONCLUSIVE_COUNT + 1))
         fi
     fi
 else
@@ -458,7 +494,7 @@ fi
 
 if [ "$DOCKER_AVAILABLE" -eq 1 ] && [ -f "$SECCOMP_PROFILE" ]; then
     # Step 4.0: Baseline Control Check (Unconfined Container)
-    BASELINE_P1=$(docker run --rm --security-opt seccomp=unconfined "$CONTAINER_IMAGE" python3 -c "
+    BASELINE_P1=$(docker run --rm -e RUN_ID="$RUN_ID" --security-opt seccomp=unconfined "$CONTAINER_IMAGE" python3 -c "
 import socket, threading
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -487,13 +523,23 @@ srv.close()
 print(res)
 " 2>/dev/null || echo "BASELINE_ERROR")
 
-    CONTAINER_OUT=$(mktemp)
-    CONTAINER_ERR=$(mktemp)
-    DOCKER_STATUS=0
+    if [ "$BASELINE_P1" != "ATTACHED" ]; then
+        if [ "$STRICT_MODE" -eq 1 ]; then
+            echo "[FAIL] FAILED (Strict mode: Baseline unconfined container failed to attach Phase 1 ULP: $BASELINE_P1)"
+            FAILED_COUNT=$((FAILED_COUNT + 1))
+        else
+            echo "[WARN] INCONCLUSIVE (Baseline unconfined container failed to attach Phase 1 ULP: $BASELINE_P1)"
+            INCONCLUSIVE_COUNT=$((INCONCLUSIVE_COUNT + 1))
+        fi
+    else
+        CONTAINER_OUT=$(mktemp)
+        CONTAINER_ERR=$(mktemp)
+        DOCKER_STATUS=0
 
-    docker run --rm --security-opt seccomp="$SECCOMP_PROFILE" "$CONTAINER_IMAGE" python3 -c "
-import socket, threading, errno, sys
+        docker run --rm -e RUN_ID="$RUN_ID" --security-opt seccomp="$SECCOMP_PROFILE" "$CONTAINER_IMAGE" python3 -c "
+import socket, threading, errno, sys, os
 
+run_id = os.environ.get('RUN_ID', '')
 seccomp_mode = 'unknown'
 try:
     with open('/proc/self/status') as f:
@@ -575,25 +621,26 @@ else:
     print(f'LEAK:{results}')
 " >"$CONTAINER_OUT" 2>"$CONTAINER_ERR" || DOCKER_STATUS=$?
 
-    SECCOMP_OUTPUT=$(cat "$CONTAINER_OUT")
-    if [ "$DOCKER_STATUS" -eq 0 ] && [ "$SECCOMP_OUTPUT" = "ALL_BLOCKED_BY_SECCOMP_FILTER" ]; then
-        echo "[PASS] PASSED (AF_ALG, TCP_ULP, SOL_TLS synchronously rejected by SECCOMP: exact EPERM, Seccomp mode=2 verified)"
-        echo "  -> Baseline Contrast: Unconfined container permitted Phase 1 ULP ($BASELINE_P1); custom profile synchronously blocked it."
-        PASSED_COUNT=$((PASSED_COUNT + 1))
-    elif [ "$DOCKER_STATUS" -ne 0 ]; then
-        ERR_SNIPPET=$(head -n 1 "$CONTAINER_ERR")
-        if [ "$STRICT_MODE" -eq 1 ]; then
-            echo "[FAIL] FAILED (Strict mode: Container execution failed: status=$DOCKER_STATUS, ${ERR_SNIPPET:-unknown error})"
-            FAILED_COUNT=$((FAILED_COUNT + 1))
+        SECCOMP_OUTPUT=$(cat "$CONTAINER_OUT")
+        if [ "$DOCKER_STATUS" -eq 0 ] && [ "$SECCOMP_OUTPUT" = "ALL_BLOCKED_BY_SECCOMP_FILTER" ]; then
+            echo "[PASS] PASSED (AF_ALG, TCP_ULP, SOL_TLS synchronously rejected by SECCOMP: exact EPERM, Seccomp mode=2 verified)"
+            echo "  -> Baseline Contrast: Unconfined container permitted Phase 1 ULP ($BASELINE_P1); custom profile synchronously blocked it."
+            PREVENTION_PASSED=$((PREVENTION_PASSED + 1))
+        elif [ "$DOCKER_STATUS" -ne 0 ]; then
+            ERR_SNIPPET=$(head -n 1 "$CONTAINER_ERR")
+            if [ "$STRICT_MODE" -eq 1 ]; then
+                echo "[FAIL] FAILED (Strict mode: Container execution failed: status=$DOCKER_STATUS, ${ERR_SNIPPET:-unknown error})"
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+            else
+                echo "[WARN] INCONCLUSIVE (Container execution failed: status=$DOCKER_STATUS, ${ERR_SNIPPET:-check docker logs})"
+                INCONCLUSIVE_COUNT=$((INCONCLUSIVE_COUNT + 1))
+            fi
         else
-            echo "[WARN] INCONCLUSIVE (Container execution failed: status=$DOCKER_STATUS, ${ERR_SNIPPET:-check docker logs})"
-            INCONCLUSIVE_COUNT=$((INCONCLUSIVE_COUNT + 1))
+            echo "[FAIL] FAILED (Seccomp policy leak: $SECCOMP_OUTPUT)"
+            FAILED_COUNT=$((FAILED_COUNT + 1))
         fi
-    else
-        echo "[FAIL] FAILED (Seccomp policy leak: $SECCOMP_OUTPUT)"
-        FAILED_COUNT=$((FAILED_COUNT + 1))
+        rm -f "$CONTAINER_OUT" "$CONTAINER_ERR"
     fi
-    rm -f "$CONTAINER_OUT" "$CONTAINER_ERR"
 else
     if [ "$STRICT_MODE" -eq 1 ]; then
         echo "[FAIL] FAILED (Strict mode: Docker runtime or seccomp profile missing)"
@@ -613,9 +660,10 @@ if [ "$DOCKER_AVAILABLE" -eq 1 ] && [ -f "$SECCOMP_P2_PROFILE" ]; then
     CONTAINER_ERR_5=$(mktemp)
     DOCKER_STATUS_5=0
 
-    docker run --rm --security-opt seccomp="$SECCOMP_P2_PROFILE" "$CONTAINER_IMAGE" python3 -c "
-import socket, threading, struct, errno
+    docker run --rm -e RUN_ID="$RUN_ID" --security-opt seccomp="$SECCOMP_P2_PROFILE" "$CONTAINER_IMAGE" python3 -c "
+import socket, threading, struct, errno, sys, os
 
+run_id = os.environ.get('RUN_ID', '')
 seccomp_mode = 'unknown'
 try:
     with open('/proc/self/status') as f:
@@ -693,7 +741,7 @@ else:
     P2_ISO_OUTPUT=$(cat "$CONTAINER_OUT_5")
     if [ "$DOCKER_STATUS_5" -eq 0 ] && [ "$P2_ISO_OUTPUT" = "PHASE2_INDEPENDENTLY_PROVEN_BY_SECCOMP" ]; then
         echo "[PASS] PASSED (Phase 1 attached successfully, Phase 2 independently blocked by SECCOMP: exact EPERM, Seccomp mode=2 verified)"
-        PASSED_COUNT=$((PASSED_COUNT + 1))
+        PREVENTION_PASSED=$((PREVENTION_PASSED + 1))
     elif [ "$DOCKER_STATUS_5" -ne 0 ]; then
         ERR_SNIPPET=$(head -n 1 "$CONTAINER_ERR_5")
         if [ "$STRICT_MODE" -eq 1 ]; then
@@ -718,6 +766,13 @@ else
     fi
 fi
 
+TOTAL_PASSED=$((PREVENTION_PASSED + DETECTION_PASSED))
+echo "========================================================================"
+echo "VERIFICATION SUMMARY:"
+echo "  Synchronous Prevention Passed: $PREVENTION_PASSED"
+echo "  Audit Detection Passed:        $DETECTION_PASSED"
+echo "  Inconclusive / Skipped:        $INCONCLUSIVE_COUNT"
+echo "  Failed Assertions:             $FAILED_COUNT"
 echo "========================================================================"
 if [ "$FAILED_COUNT" -gt 0 ]; then
     echo "[FAIL] $FAILED_COUNT ASSERTION(S) FAILED (Exit code: 1)"
@@ -727,10 +782,10 @@ elif [ "$INCONCLUSIVE_COUNT" -gt 0 ]; then
         echo "[FAIL] $INCONCLUSIVE_COUNT INCONCLUSIVE/SKIPPED ASSERTION(S) REJECTED IN STRICT MODE (Exit code: 2)"
         exit 2
     else
-        echo "[INCONCLUSIVE] $PASSED_COUNT PASSED, $INCONCLUSIVE_COUNT INCONCLUSIVE/SKIPPED (Exit code: 0)"
+        echo "[INCONCLUSIVE] $TOTAL_PASSED PASSED ($PREVENTION_PASSED prevention, $DETECTION_PASSED detection), $INCONCLUSIVE_COUNT INCONCLUSIVE/SKIPPED (Exit code: 0)"
         exit 0
     fi
 else
-    echo "[PASS] ALL 5 CONTROLS FORMALLY VERIFIED AND PASSED (Exit code: 0)"
+    echo "[PASS] ALL 5 CONTROLS FORMALLY VERIFIED AND PASSED: $PREVENTION_PASSED prevention, $DETECTION_PASSED detection (Exit code: 0)"
     exit 0
 fi
