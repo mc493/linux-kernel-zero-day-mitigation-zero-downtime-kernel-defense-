@@ -280,20 +280,25 @@ t.join(timeout=2.0)
 
 # 1. Phase 1 must succeed under isolation profile
 p1_ok = False
+p1_err = None
 try:
     cli.setsockopt(6, 31, b'tls\0')
     p1_ok = True
-except Exception:
-    pass
+except Exception as e:
+    p1_err = str(e)
 
 # 2. Phase 2 must return exact EPERM on the attached socket
 p2_blocked = False
+p2_err = 'UNBLOCKED'
 crypto_info = struct.pack('=HH8s16s4s8s', 0x0303, 51, b'\x01'*8, b'\x02'*16, b'\x03'*4, b'\x00'*8)
 try:
     cli.setsockopt(282, 1, crypto_info)
 except OSError as e:
     if e.errno == errno.EPERM:
         p2_blocked = True
+        p2_err = 'BLOCKED_EPERM'
+    else:
+        p2_err = f'{e.errno}_{errno.errorcode.get(e.errno, e.errno)}'
 
 cli.close()
 if active_conn:
@@ -303,7 +308,7 @@ srv.close()
 if p1_ok and p2_blocked:
     print('PHASE2_INDEPENDENTLY_PROVEN')
 else:
-    print(f'FAILED: p1_ok={p1_ok}, p2_blocked={p2_blocked}')
+    print(f'FAILED: p1_ok={p1_ok} (err={p1_err}), p2_blocked={p2_blocked} (res={p2_err})')
 " 2>/dev/null || echo "DOCKER_RUN_FAILED")
 
     if [ "$P2_ISO_OUTPUT" = "PHASE2_INDEPENDENTLY_PROVEN" ]; then
