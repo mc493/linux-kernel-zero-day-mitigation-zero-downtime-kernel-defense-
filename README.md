@@ -337,6 +337,7 @@ This repository includes production-ready configurations for immediate deploymen
 |       \-- blacklist-ebtables.conf     # Modprobe loader override
 |-- helm/
 |   |-- falco-rules-kernel-cve.yaml     # Falco modern eBPF rules (CO-RE)
+|   |-- falco-rules-ssh-defense.yaml    # SSH persistence & extension backdoor rules
 |   \-- README.md                       # One-line Helm deployment guide
 |-- k8s/
 |   \-- pod-userns-hardened.yaml        # containerd v2.2.4 UserNS manifest

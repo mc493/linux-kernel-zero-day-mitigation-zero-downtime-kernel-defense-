@@ -1,0 +1,44 @@
+# Falco Helm Values: Supply-Chain & IDE Extension Persistence Defense
+# Targets: Trojanized IDE Extensions, Rogue Package Hooks, and SSH Persistence Backdoors
+
+driver:
+  kind: auto
+  type: modern_ebpf
+
+falco:
+  # Linux 7.0 ABI Invariant:
+  # modern_ebpf on modern kernels must exclude openat from custom syscall sets
+  # to prevent register-clobbering parsing panics
+  base_syscalls:
+    custom_set: ['!openat']
+
+customRules:
+  rules-ssh-defense.yaml: |-
+    - rule: Detect Modification of SSH Authorized Keys or Credentials
+      desc: Detects unauthorized writes, appends, or modifications to authorized_keys or identity keys by any process (mitigates trojanized IDE extensions, rogue build hooks, and container escapes)
+      condition: >
+        (open_write and (user_ssh_directory or fd.name startswith /root/.ssh or fd.name contains "/.ssh/")
+         and (fd.name contains "authorized_keys" or fd.name contains "id_rsa" or fd.name contains "id_ed25519" or fd.name contains "id_ecdsa"))
+        or
+        (spawned_process and (proc.cmdline contains "authorized_keys" or proc.cmdline contains ".ssh/id_")
+         and not proc.name in (ssh-keygen, ssh-copy-id, sshd))
+      output: "CRITICAL: Unauthorized write or modification to SSH keys or credentials (file=%fd.name evt=%evt.type proc=%proc.name cmdline=%proc.cmdline pproc=%proc.pname user=%user.name uid=%user.uid container=%container.name id=%container.id)"
+      priority: CRITICAL
+      tags: [security, host, container, ssh, persistence, supply_chain, mitre_persistence, T1098.004]
+
+    - rule: Detect Interactive Reverse Shell Execution
+      desc: Detects interactive reverse shell commands spawned with network redirection (such as bash interactive network redirection or netcat execution)
+      condition: >
+        spawned_process
+        and proc.name in (bash, sh, zsh, dash)
+        and (proc.cmdline contains "bash -i" or proc.cmdline contains "/dev/tcp/" or proc.cmdline contains "nc -e" or proc.cmdline contains "ncat")
+      output: "CRITICAL: Interactive reverse shell attempt detected (proc=%proc.name cmdline=%proc.cmdline pproc=%proc.pname user=%user.name container=%container.name id=%container.id)"
+      priority: CRITICAL
+      tags: [security, host, container, reverse_shell, mitre_execution]
+
+falcosidekick:
+  enabled: true
+  config:
+    webhook:
+      address: "http://127.0.0.1:9876/falco-alert"
+      minimumpriority: "warning"
