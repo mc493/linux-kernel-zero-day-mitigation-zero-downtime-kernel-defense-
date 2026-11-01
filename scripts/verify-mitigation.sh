@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # verify-mitigation.sh
-# Automated Zero-Day Compensating Control Verification & CI Gating Suite (v1.3.7)
+# Automated Zero-Day Compensating Control Verification & CI Gating Suite (v1.3.8)
 # Returns exit code 0 on full compliance, >0 on any failure or strict violation.
 # ==============================================================================
 set -u
@@ -41,7 +41,7 @@ AUDIT_LOG="${AUDIT_LOG:-$DEFAULT_AUDIT_LOG}"
 AUDIT_ANCHOR="${AUDIT_ANCHOR:-${AUDIT_LOG}.anchor.json}"
 
 echo "========================================================================"
-echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE (v1.3.7)"
+echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE (v1.3.8)"
 echo "Run Identifier: $RUN_ID"
 if [ "$STRICT_MODE" -eq 1 ]; then
     echo "Mode: STRICT (Zero-tolerance CI gating active; preflight abort on error)"
