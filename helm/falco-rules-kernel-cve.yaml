@@ -7,10 +7,10 @@ driver:
 
 falco:
   # Linux 7.0 ABI Invariant:
-  # modern_ebpf on modern kernels must exclude openat from custom syscall sets
-  # to prevent register-clobbering parsing panics
+  # modern_ebpf on modern kernels must exclude openat and clone3 from custom syscall sets
+  # to prevent register-clobbering and parameter parsing panics
   base_syscalls:
-    custom_set: ['!openat']
+    custom_set: ['!openat', '!clone3']
 
 customRules:
   rules-kernel-cve.yaml: |-

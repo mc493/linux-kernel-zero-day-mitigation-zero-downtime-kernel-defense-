@@ -214,16 +214,16 @@ customRules:
 
 > **Threat Taxonomy (Exposure Gate vs. Payload Trigger):** CVE-2025-39682 resides in the kernel software receive path (`tls_sw_recvmsg()` / `rx_list` zero-length TLS records). A `setsockopt` call is the **attack surface expansion gate (precondition)**, not the payload trigger itself. By shutting the door at capability activation, unprivileged containers are blocked from exposing the kernel to the vulnerable receive path.
 
-### 3. Production Stability: Linux 7.0 ABI Filter Invariant (`!openat`)
-On modern Linux kernels (Linux 7.0+ HWE), Falco's userspace inspector engine (`libsinsp` <= 0.45 with `modern_ebpf`) encounters register parsing mismatches on `openat` string parameters (`sinsp_exception: could not parse param 2 (name)`), causing DaemonSet crash loops. 
+### 3. Production Stability: Linux 7.0 ABI Filter Invariant (`!openat`, `!clone3`)
+On modern Linux kernels (Linux 7.0+ HWE), Falco's userspace inspector engine (`libsinsp` <= 0.45 with `modern_ebpf`) encounters register and parameter parsing mismatches on `openat` string parameters (`sinsp_exception: could not parse param 2 (name)`) and `clone3` exit event parameters (`could not parse param 1 (exe)` on event 223), causing DaemonSet crash loops. 
 
-To ensure continuous driver stability on cutting-edge kernels without affecting socket/networking syscall telemetry:
+To ensure continuous driver stability on cutting-edge kernels without affecting process execution or socket/networking syscall telemetry:
 ```yaml
 falco:
   base_syscalls:
-    custom_set: ['!openat']
+    custom_set: ['!openat', '!clone3']
 ```
-*Note:* This filter exclusively bypasses `openat` path resolution. All networking syscalls (`socket`, `setsockopt`, `bind`, `connect`, `sendmsg`) remain fully monitored. On Linux 5.x/6.x LTS kernels or when using the classic kernel module driver, `!openat` can be removed to restore full filesystem call tracking.
+*Note:* This filter exclusively bypasses `openat` and `clone3` parameter parsing. Process execution tracking (`execve`, `execveat`) and all networking syscalls (`socket`, `setsockopt`, `bind`, `connect`, `sendmsg`) remain fully monitored, while thread lifecycle tracking continues seamlessly via `clone`, `fork`, and `vfork`. On Linux 5.x/6.x LTS kernels or when using the classic kernel module driver, these exclusions can be omitted to restore full filesystem and clone3 tracking.
 
 ### 4. Synchronous Inline Blocking via SECCOMP (`seccomp-kernel-cve-mitigation.json`)
 While Falco eBPF provides asynchronous detection and forensic ledger recording, synchronous prevention requires SECCOMP gating to reject malicious syscalls before kernel subsystem handlers are reached.

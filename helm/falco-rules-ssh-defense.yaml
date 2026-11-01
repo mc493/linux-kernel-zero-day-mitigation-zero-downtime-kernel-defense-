@@ -7,10 +7,10 @@ driver:
 
 falco:
   # Linux 7.0 ABI Invariant:
-  # modern_ebpf on modern kernels must exclude openat from custom syscall sets
-  # to prevent register-clobbering parsing panics
+  # modern_ebpf on modern kernels must exclude openat and clone3 from custom syscall sets
+  # to prevent register-clobbering and parameter parsing panics
   base_syscalls:
-    custom_set: ['!openat']
+    custom_set: ['!openat', '!clone3']
 
 customRules:
   rules-ssh-defense.yaml: |-
@@ -21,7 +21,7 @@ customRules:
          and (fd.name contains "authorized_keys" or fd.name contains "id_rsa" or fd.name contains "id_ed25519" or fd.name contains "id_ecdsa"))
         or
         (spawned_process and (proc.cmdline contains "authorized_keys" or proc.cmdline contains ".ssh/id_")
-         and not proc.name in (ssh-keygen, ssh-copy-id, sshd))
+         and not proc.name in (ssh-keygen, ssh-copy-id, sshd, ssh, scp, sftp, sshpass, rsync))
       output: "CRITICAL: Unauthorized write or modification to SSH keys or credentials (file=%fd.name evt=%evt.type proc=%proc.name cmdline=%proc.cmdline pproc=%proc.pname user=%user.name uid=%user.uid container=%container.name id=%container.id)"
       priority: CRITICAL
       tags: [security, host, container, ssh, persistence, supply_chain, mitre_persistence, T1098.004]
