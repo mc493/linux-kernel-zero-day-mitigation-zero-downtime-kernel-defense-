@@ -262,6 +262,29 @@ The production profile [`seccomp/seccomp-kernel-cve-mitigation.json`](seccomp/se
           "op": "SCMP_CMP_EQ"
         }
       ]
+    },
+    {
+      "names": ["socketcall"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "Block legacy 32-bit x86 multiplexed socketcall SYS_SOCKET (call=1) and SYS_SETSOCKOPT (call=14) to eliminate pointer-dereference seccomp bypasses",
+      "args": [
+        {
+          "index": 0,
+          "value": 1,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    },
+    {
+      "names": ["socketcall"],
+      "action": "SCMP_ACT_ERRNO",
+      "args": [
+        {
+          "index": 0,
+          "value": 14,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
     }
   ]
 }
@@ -464,6 +487,11 @@ In September 2026, this defense architecture was submitted for independent peer 
 * **Universal Container Invariant:** In cloud microservices, unprivileged container workloads have no legitimate reason to attach *any* TCP Upper Layer Protocol (`tls`, `smc`, `mptcp`). Broadly gating `level=6, optname=31` provides complete defense against both kTLS exploitation and unauthorized transport protocol tampering.
 * **Exposure Gate vs. Payload Execution:** CVE-2025-39682 is triggered in the software receive worker (`tls_sw_recvmsg()` / `rx_list` zero-length records). Tracing high-throughput receive-path packets in kernel space (millions of pkts/sec at 10-40 Gbps) would decimate network I/O performance. Because the receive path is physically unreachable unless a socket has successfully attached kTLS, gating capability activation at `setsockopt` completely neutralizes the exploit vector before network traffic is ever parsed.
 * **Stateless Multi-Stage Defense vs Stateful FD Tracking:** Rather than tracking complex, stateful socket file descriptors across processes (which introduces FD recycling race conditions and memory leaks), evaluating `(Phase 1 OR Phase 2)` statelessly ensures immediate detection if either phase is attempted, while bifurcating alerts into **Reconnaissance Attempts** (`evt.failed = true`, `WARNING`) and **Confirmed Kernel State Transitions** (`evt.failed = false`, `CRITICAL`).
+
+### 6. How Does the Architecture Defend Against 32-bit Compatibility Multiplexers (`socketcall`) and FD Passing?
+* **The 32-bit `socketcall` Compatibility Multiplexer:** On legacy x86 32-bit ABIs, socket operations can be invoked via the multiplexer `socketcall(int call, unsigned long *args)`. Because `args` is passed as a memory pointer, SECCOMP cannot dereference it to inspect socket domain or options. To eliminate this bypass vector, [`seccomp-kernel-cve-mitigation.json`](seccomp/seccomp-kernel-cve-mitigation.json) explicitly filters `socketcall`, synchronously blocking `call=1` (`SYS_SOCKET`) and `call=14` (`SYS_SETSOCKOPT`). On modern kernels (Linux 4.3+), standard C libraries (glibc, musl) automatically fall back to direct `socket` and `setsockopt` syscalls, which are intercepted by the framework's granular scalar filters.
+* **Pre-Existing Sockets & File Descriptor Passing (`SCM_RIGHTS`):** SECCOMP gates syscall execution for the current process hierarchy; it does not alter pre-existing sockets. In Kubernetes, unprivileged workloads run in isolated network (`netns`), mount, and IPC namespaces (`hostIPC: false`, `hostNetwork: false`). Because unprivileged containers share no UNIX domain sockets with the host, out-of-band FD injection is prevented by namespace boundaries.
+* **Privileged Containers Boundary:** In Kubernetes, containers configured with `privileged: true` bypass SECCOMP, AppArmor, and User Namespaces by design. Compensating controls require enforcing the Kubernetes PodSecurity Admission (PSA) `restricted` standard to ban `privileged: true` across untrusted namespaces.
 
 ---
 
