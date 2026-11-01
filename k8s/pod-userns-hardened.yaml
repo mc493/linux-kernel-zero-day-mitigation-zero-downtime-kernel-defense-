@@ -10,6 +10,12 @@ spec:
   # If your cluster uses a dedicated RuntimeClass name for userns, uncomment:
   # runtimeClassName: runc
   hostUsers: false
+  securityContext:
+    # Synchronous SECCOMP profile enforcing AF_ALG & kTLS blockage
+    # Staged on nodes at: /var/lib/kubelet/seccomp/profiles/seccomp-kernel-cve-mitigation.json
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/seccomp-kernel-cve-mitigation.json
   containers:
   - name: app
     image: alpine:latest

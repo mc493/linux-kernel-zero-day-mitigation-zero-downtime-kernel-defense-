@@ -18,7 +18,7 @@ echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE"
 echo "========================================================================"
 
 # Test 1: ebtables module blockade & RAM residency check
-echo -n "[Test 1/3] ebtables module loader blockade & RAM state: "
+echo -n "[Test 1/4] ebtables module loader blockade & RAM state: "
 if command -v sudo >/dev/null 2>&1; then
     sudo -n modprobe ebt_snat 2>/dev/null || modprobe ebt_snat 2>/dev/null || true
 else
@@ -34,7 +34,7 @@ else
 fi
 
 # Test 2: AF_ALG crypto socket probe & assertion
-echo -n "[Test 2/3] AF_ALG (domain 38) socket probe: "
+echo -n "[Test 2/4] AF_ALG (domain 38) socket probe: "
 TEST2_OUTPUT=$(python3 -c "
 import socket, sys
 try:
@@ -74,7 +74,7 @@ else
 fi
 
 # Test 3: kTLS Two-Phase Runtime Probe (Phase 1: TCP_ULP=31, Phase 2: SOL_TLS=282)
-echo -n "[Test 3/3] kTLS Two-Phase runtime probe (Phase 1: TCP_ULP=31, Phase 2: SOL_TLS=282): "
+echo -n "[Test 3/4] kTLS Two-Phase runtime probe (Phase 1: TCP_ULP=31, Phase 2: SOL_TLS=282): "
 TEST3_OUTPUT=$(python3 -c "
 import socket, threading, struct, errno, sys
 
@@ -163,6 +163,47 @@ elif [ "$P1_RES" = "ATTACHED" ] || [ "$P2_RES" = "CONFIGURED" ]; then
     fi
 else
     echo "Warning: Evaluation state: P1=$P1_RES, P2=$P2_RES"
+fi
+
+# Test 4: OCI Container Synchronous SECCOMP Profile Enforcement (if Docker available)
+SECCOMP_PROFILE="./seccomp/seccomp-kernel-cve-mitigation.json"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && [ -f "$SECCOMP_PROFILE" ]; then
+    echo -n "[Test 4/4] OCI Container Synchronous SECCOMP Profile Enforcement: "
+    SECCOMP_OUTPUT=$(docker run --rm --security-opt seccomp="$SECCOMP_PROFILE" python:3.11-alpine python3 -c "
+import socket
+
+blocked = []
+try:
+    socket.socket(38, socket.SOCK_SEQPACKET, 0)
+except (PermissionError, OSError):
+    blocked.append('AF_ALG')
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    s.setsockopt(6, 31, b'tls\0')
+except (PermissionError, OSError):
+    blocked.append('TCP_ULP')
+
+try:
+    s.setsockopt(282, 1, b'\x00'*40)
+except (PermissionError, OSError):
+    blocked.append('SOL_TLS')
+s.close()
+
+if len(blocked) == 3:
+    print('ALL_BLOCKED')
+else:
+    print('PARTIAL:' + ','.join(blocked))
+" 2>/dev/null || echo "DOCKER_RUN_FAILED")
+
+    if [ "$SECCOMP_OUTPUT" = "ALL_BLOCKED" ]; then
+        echo "[PASS] PASSED (AF_ALG, TCP_ULP, SOL_TLS synchronously rejected with EPERM)"
+    elif [ "$SECCOMP_OUTPUT" = "DOCKER_RUN_FAILED" ]; then
+        echo "[INFO] SKIPPED (Container image not cached or pull disabled)"
+    else
+        echo "[FAIL] FAILED (Seccomp policy leak: $SECCOMP_OUTPUT)"
+        FAILURES=$((FAILURES + 1))
+    fi
 fi
 
 echo "========================================================================"

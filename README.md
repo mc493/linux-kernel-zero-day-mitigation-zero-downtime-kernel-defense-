@@ -208,15 +208,24 @@ falco:
     custom_set: ['!openat']
 ```
 
-### 4. Synchronous Inline Blocking via SECCOMP
-If in-container workloads must be synchronously prevented from allocating `AF_ALG` sockets, apply a SECCOMP profile returning `SCMP_ACT_ERRNO`:
+### 4. Synchronous Inline Blocking via SECCOMP (`seccomp-kernel-cve-mitigation.json`)
+While Falco eBPF provides asynchronous detection and forensic ledger recording, synchronous prevention requires SECCOMP gating to reject malicious syscalls before kernel subsystem handlers are reached.
+
+The production profile [`seccomp/seccomp-kernel-cve-mitigation.json`](seccomp/seccomp-kernel-cve-mitigation.json) intercepts both `AF_ALG` socket creation and two-phase kTLS activation at the user-to-kernel boundary:
+
 ```json
 {
   "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": [
+    "SCMP_ARCH_X86_64",
+    "SCMP_ARCH_X86",
+    "SCMP_ARCH_AARCH64"
+  ],
   "syscalls": [
     {
       "names": ["socket"],
       "action": "SCMP_ACT_ERRNO",
+      "comment": "Synchronously block AF_ALG crypto sockets (domain 38) for CVE-2025-39964",
       "args": [
         {
           "index": 0,
@@ -224,9 +233,56 @@ If in-container workloads must be synchronously prevented from allocating `AF_AL
           "op": "SCMP_CMP_EQ"
         }
       ]
+    },
+    {
+      "names": ["setsockopt"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "Synchronously block Phase 1 TCP_ULP attachment (SOL_TCP=6, TCP_ULP=31) for CVE-2025-39682",
+      "args": [
+        {
+          "index": 1,
+          "value": 6,
+          "op": "SCMP_CMP_EQ"
+        },
+        {
+          "index": 2,
+          "value": 31,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    },
+    {
+      "names": ["setsockopt"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "Synchronously block Phase 2 SOL_TLS configuration (level=282) for CVE-2025-39682",
+      "args": [
+        {
+          "index": 1,
+          "value": 282,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
     }
   ]
 }
+```
+
+#### Kubernetes Workload Deployment & Seccomp Inheritance
+Deploy the profile onto all worker nodes under `/var/lib/kubelet/seccomp/profiles/seccomp-kernel-cve-mitigation.json` and bind it inside the workload pod specification ([`k8s/pod-userns-hardened.yaml`](k8s/pod-userns-hardened.yaml)):
+
+```yaml
+spec:
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/seccomp-kernel-cve-mitigation.json
+  containers:
+  - name: app
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
 ```
 
 ### 5. AF_ALG Workload Compatibility & Pre-Flight Auditing
