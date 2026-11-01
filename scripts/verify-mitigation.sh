@@ -18,7 +18,7 @@ echo "ZERO-DAY COMPENSATING CONTROL VERIFICATION SUITE"
 echo "========================================================================"
 
 # Test 1: ebtables module blockade & RAM residency check
-echo -n "[Test 1/4] ebtables module loader blockade & RAM state: "
+echo -n "[Test 1/5] ebtables module loader blockade & RAM state: "
 if command -v sudo >/dev/null 2>&1; then
     sudo -n modprobe ebt_snat 2>/dev/null || modprobe ebt_snat 2>/dev/null || true
 else
@@ -34,7 +34,7 @@ else
 fi
 
 # Test 2: AF_ALG crypto socket probe & assertion
-echo -n "[Test 2/4] AF_ALG (domain 38) socket probe: "
+echo -n "[Test 2/5] AF_ALG (domain 38) socket probe: "
 TEST2_OUTPUT=$(python3 -c "
 import socket, sys
 try:
@@ -75,7 +75,7 @@ else
 fi
 
 # Test 3: kTLS Two-Phase Runtime Probe (Phase 1: TCP_ULP=31, Phase 2: SOL_TLS=282)
-echo -n "[Test 3/4] kTLS Two-Phase runtime probe (Phase 1: TCP_ULP=31, Phase 2: SOL_TLS=282): "
+echo -n "[Test 3/5] kTLS Two-Phase runtime probe (Phase 1: TCP_ULP=31, Phase 2: SOL_TLS=282): "
 TEST3_OUTPUT=$(python3 -c "
 import socket, threading, struct, errno, sys
 
@@ -170,7 +170,7 @@ fi
 # Test 4: OCI Container Synchronous SECCOMP Profile Enforcement (if Docker available)
 SECCOMP_PROFILE="./seccomp/seccomp-kernel-cve-mitigation.json"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && [ -f "$SECCOMP_PROFILE" ]; then
-    echo -n "[Test 4/4] OCI Container Synchronous SECCOMP Profile Enforcement: "
+    echo -n "[Test 4/5] OCI Container Synchronous SECCOMP Profile Enforcement: "
     SECCOMP_OUTPUT=$(docker run --rm --security-opt seccomp="$SECCOMP_PROFILE" python:3.11-alpine python3 -c "
 import socket, threading, errno, sys
 
@@ -246,6 +246,72 @@ else:
         echo "[INFO] SKIPPED (Container image not cached or pull disabled)"
     else
         echo "[FAIL] FAILED (Seccomp policy leak: $SECCOMP_OUTPUT)"
+        FAILURES=$((FAILURES + 1))
+    fi
+fi
+
+# Test 5: Independent Phase 2 Interception Proof (Phase 1 allowed, Phase 2 independently blocked with EPERM)
+SECCOMP_P2_PROFILE="./seccomp/seccomp-test-phase2-isolation.json"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && [ -f "$SECCOMP_P2_PROFILE" ]; then
+    echo -n "[Test 5/5] Independent Phase 2 kTLS Interception Proof: "
+    P2_ISO_OUTPUT=$(docker run --rm --security-opt seccomp="$SECCOMP_P2_PROFILE" python:3.11-alpine python3 -c "
+import socket, threading, struct, errno
+
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(('127.0.0.1', 0))
+srv.listen(1)
+port = srv.getsockname()[1]
+
+active_conn = None
+def accept():
+    global active_conn
+    try:
+        active_conn, _ = srv.accept()
+    except Exception:
+        pass
+t = threading.Thread(target=accept)
+t.daemon = True
+t.start()
+
+cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+cli.connect(('127.0.0.1', port))
+t.join(timeout=2.0)
+
+# 1. Phase 1 must succeed under isolation profile
+p1_ok = False
+try:
+    cli.setsockopt(6, 31, b'tls\0')
+    p1_ok = True
+except Exception:
+    pass
+
+# 2. Phase 2 must return exact EPERM on the attached socket
+p2_blocked = False
+crypto_info = struct.pack('=HH8s16s4s8s', 0x0303, 51, b'\x01'*8, b'\x02'*16, b'\x03'*4, b'\x00'*8)
+try:
+    cli.setsockopt(282, 1, crypto_info)
+except OSError as e:
+    if e.errno == errno.EPERM:
+        p2_blocked = True
+
+cli.close()
+if active_conn:
+    active_conn.close()
+srv.close()
+
+if p1_ok and p2_blocked:
+    print('PHASE2_INDEPENDENTLY_PROVEN')
+else:
+    print(f'FAILED: p1_ok={p1_ok}, p2_blocked={p2_blocked}')
+" 2>/dev/null || echo "DOCKER_RUN_FAILED")
+
+    if [ "$P2_ISO_OUTPUT" = "PHASE2_INDEPENDENTLY_PROVEN" ]; then
+        echo "[PASS] PASSED (Phase 1 attached successfully, Phase 2 independently blocked with EPERM)"
+    elif [ "$P2_ISO_OUTPUT" = "DOCKER_RUN_FAILED" ]; then
+        echo "[INFO] SKIPPED (Container image not cached or pull disabled)"
+    else
+        echo "[FAIL] FAILED (Phase 2 isolation proof failed: $P2_ISO_OUTPUT)"
         FAILURES=$((FAILURES + 1))
     fi
 fi

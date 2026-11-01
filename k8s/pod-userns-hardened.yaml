@@ -18,8 +18,8 @@ spec:
       localhostProfile: profiles/seccomp-kernel-cve-mitigation.json
   containers:
   - name: app
-    # Pin immutable release image (replaces unpinned :latest)
-    image: alpine:3.20.3
+    # Pin immutable release image by cryptographic digest (guarantees provenance & immutability)
+    image: alpine:3.20.3@sha256:1e42bbe2508154c9126d48c2b8a75420c3544343bf86fd041fb7527e017a4b4a
     command: ["sleep", "3600"]
     securityContext:
       allowPrivilegeEscalation: false

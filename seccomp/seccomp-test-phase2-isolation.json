@@ -1,0 +1,24 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": [
+    "SCMP_ARCH_X86_64",
+    "SCMP_ARCH_X86",
+    "SCMP_ARCH_AARCH64"
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "setsockopt"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "Phase 2 Isolation Assertion: Permits Phase 1 TCP_ULP to attach, strictly blocking Phase 2 SOL_TLS with EPERM",
+      "args": [
+        {
+          "index": 1,
+          "value": 282,
+          "op": "SCMP_CMP_EQ"
+        }
+      ]
+    }
+  ]
+}
