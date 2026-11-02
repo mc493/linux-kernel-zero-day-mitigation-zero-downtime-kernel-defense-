@@ -18,9 +18,10 @@ In production Kubernetes clusters, passively awaiting vendor packages exposes sy
 
 This case study documents a **defense-in-depth compensating control framework** designed to manage three concurrent Linux kernel vulnerabilities (CVE-2025-39964, CVE-2026-53266, CVE-2025-39682) across userspace, the kernel loader, and runtime layers without requiring host reboots.
 
-> **Automated Framework Announcement (v1.0.0):**  
-> Looking for an automated, zero-dependency CLI that audits attack surfaces, disarms dormant modules with 60-second watchdog rollbacks, and provides cross-node dual-witness WORM attestation?  
-> See the companion framework: **[`kshield` (Project Aegis-Kernel)](https://github.com/mc493/kshield)**.
+> [!TIP]
+> ### Automated Fleet Deployment: Project `kshield`
+> Looking to apply automated, declarative zero-downtime compensating controls across your Kubernetes fleet with a single CLI, Seccomp sandboxing, and cross-node dual-witness WORM attestation?  
+> Deploy **[`kshield` (Universal Kernel Defense Framework)](https://github.com/mc493/kshield)** — the production-hardened reference CLI featuring a 60-second interactive watchdog, live sysctl enforcement (including CVE-2026-98432 MPTCP disarm), and immutable cryptographic audit ledgers.
 
 ---
 
