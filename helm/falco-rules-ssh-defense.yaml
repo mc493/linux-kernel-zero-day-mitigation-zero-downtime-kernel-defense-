@@ -37,11 +37,12 @@ customRules:
                  or proc.cmdline contains "git "
                  or proc.cmdline contains "cat <<"
                  or proc.cmdline contains "grep "
-                 or proc.pname in (make, gcc, dkms, dpkg, apt, kubectl, helm, git, python, python3))
+                 or proc.cmdline contains "rsync"
+                 or proc.pname in (make, gcc, dkms, dpkg, apt, kubectl, helm, git, python, python3, rsync))
         and (
              ((proc.cmdline contains "-i" or proc.cmdline contains " -i ") and (proc.cmdline contains "/dev/tcp/" or proc.cmdline contains "/dev/udp/"))
              or
-             ((proc.cmdline glob "*nc *" or proc.cmdline glob "*ncat*" or proc.cmdline glob "nc *" or proc.cmdline glob "ncat *")
+             ((proc.cmdline glob "* nc *" or proc.cmdline glob "nc *" or proc.cmdline glob "*/nc *" or proc.cmdline glob "* ncat *" or proc.cmdline glob "ncat *" or proc.cmdline glob "*/ncat *")
               and (proc.cmdline contains " -e " or proc.cmdline contains " -e/" or proc.cmdline contains " -c " or proc.cmdline contains " --exec " or proc.cmdline contains " --sh-exec "))
             )
       output: "CRITICAL: Interactive reverse shell attempt detected (proc=%proc.name cmdline=%proc.cmdline pproc=%proc.pname user=%user.name container=%container.name id=%container.id)"
