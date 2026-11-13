@@ -1,7 +1,7 @@
 # 360° Repository Traffic & Telemetry History
 
 > **Repository:** [`mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-`](https://github.com/mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-)  
-> **Last Updated:** `2026-11-12T05:56:24.158226+00:00` (UTC)  
+> **Last Updated:** `2026-11-13T20:03:06.620400+00:00` (UTC)  
 > **Archival Engine:** Automated Continuous Time-Series Ledger (Defeats GitHub 14-Day Cliff)
 
 ---
@@ -10,9 +10,9 @@
 
 | Metric | Total / Status | Description |
 | :--- | :---: | :--- |
-| **Live Badge Hits** | `1,527` | Public visual hits via `hits.sh` web beacon |
-| **Total Page Views** | `379` | Cumulative page views tracked via GitHub API |
-| **Total Git Clones** | `207` | Cumulative repository clones via CLI |
+| **Live Badge Hits** | `896` | Public visual hits via `hits.sh` web beacon |
+| **Total Page Views** | `504` | Cumulative page views tracked via GitHub API |
+| **Total Git Clones** | `607` | Cumulative repository clones via CLI |
 | **Stargazers** | `2` | Total GitHub stars |
 | **Forks** | `1` | Total repository forks |
 | **Watchers** | `0` | Total subscribers |
@@ -23,19 +23,20 @@
 
 | Date | Web Beacon Hits | GitHub Views (Total) | GitHub Views (Unique) | Git Clones |
 | :---: | :---: | :---: | :---: | :---: |
-| `2026-11-12` | 2 | - | - | - |
-| `2026-11-11` | 3 | - | - | - |
-| `2026-11-09` | 8 | - | - | - |
-| `2026-11-08` | 2 | - | - | - |
-| `2026-11-07` | 8 | - | - | - |
-| `2026-11-06` | 5 | - | - | - |
-| `2026-11-05` | 6 | - | - | - |
-| `2026-11-04` | 8 | - | - | - |
-| `2026-11-03` | 4 | - | - | - |
-| `2026-11-02` | 23 | - | - | - |
-| `2026-11-01` | 9 | - | - | - |
-| `2026-10-31` | 3 | - | - | - |
-| `2026-10-30` | 3 | - | - | - |
+| `2026-11-12` | 2 | 20 | 4 | 18 |
+| `2026-11-11` | 3 | 4 | 1 | 22 |
+| `2026-11-10` | - | 3 | 1 | 5 |
+| `2026-11-09` | 8 | 1 | 1 | 19 |
+| `2026-11-08` | 2 | 7 | 3 | 16 |
+| `2026-11-07` | 8 | 0 | 0 | 17 |
+| `2026-11-06` | 5 | 11 | 3 | 14 |
+| `2026-11-05` | 6 | 5 | 3 | 25 |
+| `2026-11-04` | 8 | 3 | 3 | 8 |
+| `2026-11-03` | 4 | 8 | 3 | 63 |
+| `2026-11-02` | 23 | 27 | 2 | 47 |
+| `2026-11-01` | 9 | 30 | 2 | 106 |
+| `2026-10-31` | 3 | 2 | 2 | 20 |
+| `2026-10-30` | 3 | 4 | 2 | 20 |
 | `2026-10-29` | 1 | - | - | - |
 | `2026-10-28` | 4 | - | - | - |
 | `2026-10-27` | 3 | - | - | - |
@@ -78,7 +79,10 @@
 
 | Referrer | Views (Total) | Visitors (Unique) |
 | :--- | :---: | :---: |
-| *No external referrers recorded yet (requires TRAFFIC_TOKEN)* | 0 | 0 |
+| **github.com** | 50 | 6 |
+| **Google** | 3 | 3 |
+| **Bing** | 1 | 1 |
+| **sechub.in** | 1 | 1 |
 
 ---
 

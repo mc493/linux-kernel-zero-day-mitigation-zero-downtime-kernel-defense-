@@ -1,5 +1,5 @@
 {
-  "badge_hits": 1527,
+  "badge_hits": 896,
   "daily_beacon_hits": {
     "2026-09-23": 20,
     "2026-09-24": 117,
@@ -54,19 +54,148 @@
     "2026-09-23": {
       "count": 207,
       "uniques": 87
+    },
+    "2026-10-30": {
+      "count": 20,
+      "uniques": 8
+    },
+    "2026-10-31": {
+      "count": 20,
+      "uniques": 10
+    },
+    "2026-11-01": {
+      "count": 106,
+      "uniques": 24
+    },
+    "2026-11-02": {
+      "count": 47,
+      "uniques": 17
+    },
+    "2026-11-03": {
+      "count": 63,
+      "uniques": 28
+    },
+    "2026-11-04": {
+      "count": 8,
+      "uniques": 5
+    },
+    "2026-11-05": {
+      "count": 25,
+      "uniques": 14
+    },
+    "2026-11-06": {
+      "count": 14,
+      "uniques": 6
+    },
+    "2026-11-07": {
+      "count": 17,
+      "uniques": 9
+    },
+    "2026-11-08": {
+      "count": 16,
+      "uniques": 8
+    },
+    "2026-11-09": {
+      "count": 19,
+      "uniques": 9
+    },
+    "2026-11-10": {
+      "count": 5,
+      "uniques": 3
+    },
+    "2026-11-11": {
+      "count": 22,
+      "uniques": 11
+    },
+    "2026-11-12": {
+      "count": 18,
+      "uniques": 9
     }
   },
   "daily_views": {
     "2026-09-23": {
       "count": 379,
       "uniques": 199
+    },
+    "2026-10-30": {
+      "count": 4,
+      "uniques": 2
+    },
+    "2026-10-31": {
+      "count": 2,
+      "uniques": 2
+    },
+    "2026-11-01": {
+      "count": 30,
+      "uniques": 2
+    },
+    "2026-11-02": {
+      "count": 27,
+      "uniques": 2
+    },
+    "2026-11-03": {
+      "count": 8,
+      "uniques": 3
+    },
+    "2026-11-04": {
+      "count": 3,
+      "uniques": 3
+    },
+    "2026-11-05": {
+      "count": 5,
+      "uniques": 3
+    },
+    "2026-11-06": {
+      "count": 11,
+      "uniques": 3
+    },
+    "2026-11-07": {
+      "count": 0,
+      "uniques": 0
+    },
+    "2026-11-08": {
+      "count": 7,
+      "uniques": 3
+    },
+    "2026-11-09": {
+      "count": 1,
+      "uniques": 1
+    },
+    "2026-11-10": {
+      "count": 3,
+      "uniques": 1
+    },
+    "2026-11-11": {
+      "count": 4,
+      "uniques": 1
+    },
+    "2026-11-12": {
+      "count": 20,
+      "uniques": 4
     }
   },
   "first_recorded": "2026-09-22T15:37:05.353038+00:00",
   "forks": 1,
-  "last_updated": "2026-11-12T05:56:24.158226+00:00",
+  "last_updated": "2026-11-13T20:03:06.620400+00:00",
   "open_issues": 0,
-  "referrers": {},
+  "referrers": {
+    "Bing": {
+      "count": 1,
+      "uniques": 1
+    },
+    "Google": {
+      "count": 3,
+      "uniques": 3
+    },
+    "github.com": {
+      "count": 50,
+      "uniques": 6
+    },
+    "sechub.in": {
+      "count": 1,
+      "uniques": 1
+    }
+  },
   "repository": "mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-",
   "stars": 2,
   "watchers": 0
