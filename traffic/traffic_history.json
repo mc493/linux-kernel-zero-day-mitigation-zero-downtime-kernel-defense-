@@ -117,6 +117,10 @@
     "2026-11-13": {
       "count": 10,
       "uniques": 7
+    },
+    "2026-11-14": {
+      "count": 36,
+      "uniques": 18
     }
   },
   "daily_views": {
@@ -183,11 +187,15 @@
     "2026-11-13": {
       "count": 10,
       "uniques": 1
+    },
+    "2026-11-14": {
+      "count": 5,
+      "uniques": 1
     }
   },
   "first_recorded": "2026-09-22T15:37:05.353038+00:00",
   "forks": 1,
-  "last_updated": "2026-11-15T05:01:10.513360+00:00",
+  "last_updated": "2026-11-16T04:58:55.760007+00:00",
   "open_issues": 0,
   "referrers": {
     "Bing": {
@@ -195,12 +203,12 @@
       "uniques": 1
     },
     "Google": {
-      "count": 3,
-      "uniques": 3
+      "count": 2,
+      "uniques": 2
     },
     "github.com": {
-      "count": 51,
-      "uniques": 5
+      "count": 53,
+      "uniques": 4
     },
     "sechub.in": {
       "count": 1,
