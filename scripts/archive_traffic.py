@@ -152,10 +152,9 @@ def main():
         except Exception as e:
             print(f"Warning: Could not parse existing history file: {e}")
 
-    history.setdefault("daily_beacon_hits", {})
-    history.setdefault("daily_views", {})
-    history.setdefault("daily_clones", {})
-    history.setdefault("referrers", {})
+    for dict_key in ("daily_beacon_hits", "daily_views", "daily_clones", "referrers"):
+        if not isinstance(history.get(dict_key), dict):
+            history[dict_key] = {}
 
     # 2. Fetch Badge Hits and Daily Web Beacon Telemetry
     total_badge, daily_beacon = fetch_badge_hits(REPO, history.get("badge_hits", 0))
