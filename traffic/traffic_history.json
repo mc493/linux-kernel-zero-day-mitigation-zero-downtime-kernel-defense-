@@ -1,5 +1,5 @@
 {
-  "badge_hits": 1570,
+  "badge_hits": 1571,
   "daily_beacon_hits": {
     "2026-09-23": 20,
     "2026-09-24": 117,
@@ -62,7 +62,7 @@
     "2026-11-24": 1,
     "2026-11-25": 5,
     "2026-11-26": 2,
-    "2026-11-27": 1
+    "2026-11-27": 2
   },
   "daily_clones": {
     "2026-09-23": {
@@ -176,6 +176,14 @@
     "2026-11-25": {
       "count": 4,
       "uniques": 3
+    },
+    "2026-11-26": {
+      "count": 34,
+      "uniques": 19
+    },
+    "2026-11-27": {
+      "count": 15,
+      "uniques": 8
     }
   },
   "daily_views": {
@@ -290,11 +298,19 @@
     "2026-11-25": {
       "count": 3,
       "uniques": 1
+    },
+    "2026-11-26": {
+      "count": 0,
+      "uniques": 0
+    },
+    "2026-11-27": {
+      "count": 1,
+      "uniques": 1
     }
   },
   "first_recorded": "2026-09-22T15:37:05.353038+00:00",
   "forks": 1,
-  "last_updated": "2026-11-27T06:56:51.776378+00:00",
+  "last_updated": "2026-11-28T06:31:24.307161+00:00",
   "open_issues": 0,
   "referrers": {
     "Bing": {
@@ -302,16 +318,16 @@
       "uniques": 1
     },
     "Google": {
-      "count": 4,
+      "count": 3,
       "uniques": 3
     },
     "diginews.johandenoyer.fr": {
-      "count": 1,
-      "uniques": 1
+      "count": 2,
+      "uniques": 2
     },
     "github.com": {
-      "count": 18,
-      "uniques": 3
+      "count": 8,
+      "uniques": 2
     },
     "sechub.in": {
       "count": 1,

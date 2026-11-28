@@ -1,7 +1,7 @@
 # 360° Repository Traffic & Telemetry History
 
 > **Repository:** [`mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-`](https://github.com/mc493/linux-kernel-zero-day-mitigation-zero-downtime-kernel-defense-)  
-> **Last Updated:** `2026-11-27T06:56:51.776378+00:00` (UTC)  
+> **Last Updated:** `2026-11-28T06:31:24.307161+00:00` (UTC)  
 > **Archival Engine:** Automated Continuous Time-Series Ledger (Defeats GitHub 14-Day Cliff)
 
 ---
@@ -10,9 +10,9 @@
 
 | Metric | Total / Status | Description |
 | :--- | :---: | :--- |
-| **Live Badge Hits** | `1,570` | Public visual hits via `hits.sh` web beacon |
-| **Total Page Views** | `540` | Cumulative page views tracked via GitHub API |
-| **Total Git Clones** | `778` | Cumulative repository clones via CLI |
+| **Live Badge Hits** | `1,571` | Public visual hits via `hits.sh` web beacon |
+| **Total Page Views** | `541` | Cumulative page views tracked via GitHub API |
+| **Total Git Clones** | `827` | Cumulative repository clones via CLI |
 | **Stargazers** | `2` | Total GitHub stars |
 | **Forks** | `1` | Total repository forks |
 | **Watchers** | `0` | Total subscribers |
@@ -23,8 +23,8 @@
 
 | Date | Web Beacon Hits | GitHub Views (Total) | GitHub Views (Unique) | Git Clones |
 | :---: | :---: | :---: | :---: | :---: |
-| `2026-11-27` | 1 | - | - | - |
-| `2026-11-26` | 2 | - | - | - |
+| `2026-11-27` | 2 | 1 | 1 | 15 |
+| `2026-11-26` | 2 | 0 | 0 | 34 |
 | `2026-11-25` | 5 | 3 | 1 | 4 |
 | `2026-11-24` | 1 | 3 | 2 | 6 |
 | `2026-11-23` | 5 | 0 | 0 | 40 |
@@ -94,10 +94,10 @@
 
 | Referrer | Views (Total) | Visitors (Unique) |
 | :--- | :---: | :---: |
-| **github.com** | 18 | 3 |
-| **Google** | 4 | 3 |
+| **github.com** | 8 | 2 |
+| **Google** | 3 | 3 |
+| **diginews.johandenoyer.fr** | 2 | 2 |
 | **Bing** | 1 | 1 |
-| **diginews.johandenoyer.fr** | 1 | 1 |
 | **sechub.in** | 1 | 1 |
 
 ---
